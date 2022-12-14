@@ -61,8 +61,11 @@ mp::ReturnCode cmd::Restart::run(mp::ArgParser* parser)
             return cmd::handle_user_password(client, term);
         }
 
-        spinner.stop();
-        spinner.start(reply.reply_message());
+        if (const auto& msg = reply.reply_message(); !msg.empty())
+        {
+            spinner.stop();
+            spinner.start(reply.reply_message());
+        }
     };
 
     request.set_verbosity_level(parser->verbosityLevel());
