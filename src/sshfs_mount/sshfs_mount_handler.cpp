@@ -201,6 +201,7 @@ void SSHFSMountHandler::stop_impl(bool force)
         else
             throw std::runtime_error{err};
     }
+    QObject::disconnect(process.get(), &Process::error_occurred, nullptr, nullptr);
     process.reset();
 }
 
