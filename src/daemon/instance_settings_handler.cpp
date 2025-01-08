@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,19 +17,23 @@
 
 #include "instance_settings_handler.h"
 
+#include <multipass/cli/prompters.h>
 #include <multipass/constants.h>
 #include <multipass/exceptions/invalid_memory_size_exception.h>
+#include <multipass/settings/bool_setting_spec.h>
 
 #include <QRegularExpression>
 #include <QStringList>
 
 namespace mp = multipass;
+namespace mpl = multipass::logging;
 
 namespace
 {
 constexpr auto cpus_suffix = "cpus";
 constexpr auto mem_suffix = "memory";
 constexpr auto disk_suffix = "disk";
+constexpr auto bridged_suffix = "bridged";
 
 enum class Operation
 {
@@ -46,7 +50,7 @@ QRegularExpression make_key_regex()
 {
     const auto instance_pattern = QStringLiteral("(?<instance>.+)");
     const auto prop_template = QStringLiteral("(?<property>%1)");
-    const auto either_prop = QStringList{cpus_suffix, mem_suffix, disk_suffix}.join("|");
+    const auto either_prop = QStringList{cpus_suffix, mem_suffix, disk_suffix, bridged_suffix}.join("|");
     const auto prop_pattern = prop_template.arg(either_prop);
 
     const auto key_template = QStringLiteral(R"(%1\.%2\.%3)");
@@ -95,8 +99,9 @@ void check_state_for_update(mp::VirtualMachine& instance)
 {
     auto st = instance.current_state();
     if (st != mp::VirtualMachine::State::stopped && st != mp::VirtualMachine::State::off)
-        throw mp::InstanceSettingsException{operation_msg(Operation::Modify), instance.vm_name,
-                                            "Instance must be stopped for modification"};
+        throw mp::InstanceStateSettingsException{operation_msg(Operation::Modify),
+                                                 instance.vm_name,
+                                                 "Instance must be stopped for modification"};
 }
 
 mp::MemorySize get_memory_size(const QString& key, const QString& val)
@@ -153,6 +158,21 @@ void update_disk(const QString& key, const QString& val, mp::VirtualMachine& ins
     }
 }
 
+void update_bridged(const QString& key,
+                    const QString& val,
+                    const std::string& instance_name,
+                    std::function<bool(const std::string&)> is_bridged,
+                    std::function<void(const std::string&)> add_interface)
+{
+    auto want_bridged = mp::BoolSettingSpec{key, "false"}.interpret(val) == "true";
+    if (!want_bridged)
+    {
+        if (is_bridged(instance_name)) // inspects host networks once
+            throw mp::InvalidSettingException{key, val, "Removing the bridged network is currently not supported"};
+    }
+    else
+        add_interface(instance_name); // if already bridged, this merely warns
+}
 } // namespace
 
 mp::InstanceSettingsException::InstanceSettingsException(const std::string& reason, const std::string& instance,
@@ -163,14 +183,19 @@ mp::InstanceSettingsException::InstanceSettingsException(const std::string& reas
 
 mp::InstanceSettingsHandler::InstanceSettingsHandler(
     std::unordered_map<std::string, VMSpecs>& vm_instance_specs,
-    std::unordered_map<std::string, VirtualMachine::ShPtr>& vm_instances,
+    std::unordered_map<std::string, VirtualMachine::ShPtr>& operative_instances,
     const std::unordered_map<std::string, VirtualMachine::ShPtr>& deleted_instances,
-    const std::unordered_set<std::string>& preparing_instances, std::function<void()> instance_persister)
+    const std::unordered_set<std::string>& preparing_instances,
+    std::function<void()> instance_persister,
+    std::function<bool(const std::string&)> is_bridged,
+    std::function<void(const std::string&)> add_interface)
     : vm_instance_specs{vm_instance_specs},
-      vm_instances{vm_instances},
+      operative_instances{operative_instances},
       deleted_instances{deleted_instances},
       preparing_instances{preparing_instances},
-      instance_persister{std::move(instance_persister)}
+      instance_persister{std::move(instance_persister)},
+      is_bridged{is_bridged},
+      add_interface{add_interface}
 {
 }
 
@@ -180,7 +205,7 @@ std::set<QString> mp::InstanceSettingsHandler::keys() const
 
     std::set<QString> ret;
     for (const auto& item : vm_instance_specs)
-        for (const auto& suffix : {cpus_suffix, mem_suffix, disk_suffix})
+        for (const auto& suffix : {cpus_suffix, mem_suffix, disk_suffix, bridged_suffix})
             ret.insert(key_template.arg(item.first.c_str()).arg(suffix));
 
     return ret;
@@ -191,6 +216,10 @@ QString mp::InstanceSettingsHandler::get(const QString& key) const
     auto [instance_name, property] = parse_key(key);
     const auto& spec = find_spec(instance_name);
 
+    if (property == bridged_suffix)
+    {
+        return is_bridged(instance_name) ? "true" : "false";
+    }
     if (property == cpus_suffix)
         return QString::number(spec.num_cores);
     if (property == mem_suffix)
@@ -206,7 +235,7 @@ void mp::InstanceSettingsHandler::set(const QString& key, const QString& val)
     auto [instance_name, property] = parse_key(key);
 
     if (preparing_instances.find(instance_name) != preparing_instances.end())
-        throw InstanceSettingsException{operation_msg(Operation::Modify), instance_name, "Instance is being prepared"};
+        throw InstanceSettingsException{operation_msg(Operation::Modify), instance_name, "instance is being prepared"};
 
     auto& instance = modify_instance(instance_name); // we need this first, to refuse updating deleted instances
     auto& spec = modify_spec(instance_name);
@@ -214,6 +243,10 @@ void mp::InstanceSettingsHandler::set(const QString& key, const QString& val)
 
     if (property == cpus_suffix)
         update_cpus(key, val, instance, spec);
+    else if (property == bridged_suffix)
+    {
+        update_bridged(key, val, instance_name, is_bridged, add_interface);
+    }
     else
     {
         auto size = get_memory_size(key, val);
@@ -231,7 +264,7 @@ void mp::InstanceSettingsHandler::set(const QString& key, const QString& val)
 
 auto mp::InstanceSettingsHandler::modify_instance(const std::string& instance_name) -> VirtualMachine&
 {
-    auto ret = pick_instance(vm_instances, instance_name, Operation::Modify, deleted_instances);
+    auto ret = pick_instance(operative_instances, instance_name, Operation::Modify, deleted_instances);
 
     assert(ret && "can't have null instance");
     return *ret;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,29 +20,14 @@
 
 #include <multipass/mount_handler.h>
 
-#include "stub_ssh_key_provider.h"
-
-namespace multipass
-{
-namespace test
+namespace multipass::test
 {
 class MockMountHandler : public MountHandler
 {
 public:
-    MockMountHandler() : MountHandler{key_provider}
-    {
-    }
-
-    MOCK_METHOD(void, init_mount, (VirtualMachine*, const std::string&, const VMMount&), (override));
-    MOCK_METHOD(void, start_mount,
-                (VirtualMachine*, ServerVariant, const std::string&, const std::chrono::milliseconds&), (override));
-    MOCK_METHOD(void, stop_mount, (const std::string&, const std::string&), (override));
-    MOCK_METHOD(void, stop_all_mounts_for_instance, (const std::string&), (override));
-    MOCK_METHOD(bool, has_instance_already_mounted, (const std::string&, const std::string&), (const, override));
-
-private:
-    StubSSHKeyProvider key_provider;
+    MOCK_METHOD(void, activate_impl, (ServerVariant, std::chrono::milliseconds), (override));
+    MOCK_METHOD(void, deactivate_impl, (bool), (override));
+    MOCK_METHOD(bool, is_active, (), (override));
 };
-} // namespace test
-} // namespace multipass
+} // namespace multipass::test
 #endif // MULTIPASS_MOCK_MOUNT_HANDLER_H

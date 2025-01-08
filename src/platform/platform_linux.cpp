@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,11 +35,14 @@
 
 #ifdef QEMU_ENABLED
 #include "backends/qemu/qemu_virtual_machine_factory.h"
-#else
-#define QEMU_ENABLED 0
 #endif
 
+#ifdef MULTIPASS_JOURNALD_ENABLED
 #include "logger/journald_logger.h"
+#else
+#include "logger/syslog_logger.h"
+#endif
+
 #include "platform_linux_detail.h"
 #include "platform_shared.h"
 #include "shared/linux/process_factory.h"
@@ -62,12 +65,12 @@
 
 namespace mp = multipass;
 namespace mpl = multipass::logging;
-namespace mu = multipass::utils;
+namespace mpu = multipass::utils;
 
 namespace
 {
-constexpr auto autostart_filename = "multipass.gui.autostart.desktop";
 constexpr auto category = "Linux platform";
+constexpr auto br_nomenclature = "bridge";
 
 // Fetch the ARP protocol HARDWARE identifier.
 int get_net_type(const QDir& net_dir) // types defined in if_arp.h
@@ -83,7 +86,7 @@ int get_net_type(const QDir& net_dir) // types defined in if_arp.h
         return ok ? got : default_ret;
     }
 
-    auto snap_hint = mu::in_multipass_snap() ? " Is the 'network-observe' snap interface connected?" : "";
+    auto snap_hint = mpu::in_multipass_snap() ? " Is the 'network-observe' snap interface connected?" : "";
     mpl::log(mpl::Level::warning, category, fmt::format("Could not read {}.{}", type_file.fileName(), snap_hint));
 
     return default_ret;
@@ -129,7 +132,7 @@ std::optional<mp::NetworkInterfaceInfo> get_network(const QDir& net_dir)
     static const auto bridge_fname = QStringLiteral("brif");
     auto id = net_dir.dirName().toStdString();
 
-    if (auto bridge = "bridge"; net_dir.exists(bridge))
+    if (net_dir.exists(br_nomenclature))
     {
         std::vector<std::string> links;
         QStringList bridge_members = QDir{net_dir.filePath(bridge_fname)}.entryList(QDir::NoDotAndDotDot | QDir::Dirs);
@@ -138,7 +141,10 @@ std::optional<mp::NetworkInterfaceInfo> get_network(const QDir& net_dir)
         std::transform(bridge_members.cbegin(), bridge_members.cend(), std::back_inserter(links),
                        [](const QString& interface) { return interface.toStdString(); });
 
-        return {{std::move(id), bridge, /*description=*/"", std::move(links)}}; // description needs updating with links
+        return {{std::move(id),
+                 br_nomenclature,
+                 /*description=*/"",
+                 std::move(links)}}; // description needs updating with links
     }
     else if (is_ethernet(net_dir))
         return {{std::move(id), "ethernet", "Ethernet device"}};
@@ -150,7 +156,7 @@ void update_bridges(std::map<std::string, mp::NetworkInterfaceInfo>& networks)
 {
     for (auto& item : networks)
     {
-        if (auto& net = item.second; net.type == "bridge")
+        if (auto& net = item.second; net.type == br_nomenclature)
         { // bridge descriptions and links depend on what other networks we recognized
             auto& links = net.links;
             auto is_unknown = [&networks](const std::string& id) {
@@ -201,7 +207,7 @@ std::pair<QString, QString> multipass::platform::detail::parse_os_release(const 
 
     for (const QString& line : os_data)
     {
-        QStringList split = line.split('=', QString::KeepEmptyParts);
+        QStringList split = line.split('=', Qt::KeepEmptyParts);
         if (split.length() == 2 && split[1].length() > 2) // Check for at least 1 char between quotes.
         {
             if (split[0] == id_field)
@@ -251,6 +257,11 @@ QString mp::platform::Platform::get_blueprints_url_override() const
 
 bool mp::platform::Platform::is_alias_supported(const std::string& alias, const std::string& remote) const
 {
+    if (remote == mp::snapcraft_remote)
+    {
+        return supported_snapcraft_aliases.find(alias) != supported_snapcraft_aliases.end();
+    }
+
     return true;
 }
 
@@ -261,7 +272,11 @@ bool mp::platform::Platform::is_remote_supported(const std::string& remote) cons
 
 bool mp::platform::Platform::is_backend_supported(const QString& backend) const
 {
-    return (backend == "qemu" && QEMU_ENABLED) || backend == "libvirt" || backend == "lxd";
+    return
+#ifdef QEMU_ENABLED
+        backend == "qemu" ||
+#endif
+        backend == "libvirt" || backend == "lxd";
 }
 
 bool mp::platform::Platform::link(const char* target, const char* link) const
@@ -273,9 +288,9 @@ QDir mp::platform::Platform::get_alias_scripts_folder() const
 {
     QDir aliases_folder;
 
-    if (mu::in_multipass_snap())
+    if (mpu::in_multipass_snap())
     {
-        aliases_folder = QDir(QString(mu::snap_user_common_dir()) + "/bin");
+        aliases_folder = QDir(QString(mpu::snap_user_common_dir()) + "/bin");
     }
     else
     {
@@ -290,9 +305,9 @@ void mp::platform::Platform::create_alias_script(const std::string& alias, const
 {
     std::string file_path = get_alias_script_path(alias);
 
-    std::string multipass_exec = mu::in_multipass_snap()
+    std::string multipass_exec = mpu::in_multipass_snap()
                                      ? "exec /usr/bin/snap run multipass"
-                                     : fmt::format("\"{}\"", QCoreApplication::applicationFilePath());
+                                     : fmt::format("{:?}", QCoreApplication::applicationFilePath().toStdString());
 
     std::string script = "#!/bin/sh\n\n" + multipass_exec + " " + alias + " -- \"${@}\"\n";
 
@@ -336,15 +351,28 @@ QString mp::platform::Platform::daemon_config_home() const // temporary
 
 QString mp::platform::Platform::default_driver() const
 {
-    if (QEMU_ENABLED)
-        return QStringLiteral("qemu");
-    else
-        return QStringLiteral("lxd");
+    return QStringLiteral(
+#ifdef QEMU_ENABLED
+        "qemu"
+#else
+        "lxd"
+#endif
+    );
 }
 
 QString mp::platform::Platform::default_privileged_mounts() const
 {
     return QStringLiteral("true");
+}
+
+bool mp::platform::Platform::is_image_url_supported() const
+{
+    return true;
+}
+
+std::string mp::platform::Platform::bridge_nomenclature() const
+{
+    return br_nomenclature;
 }
 
 auto mp::platform::detail::get_network_interfaces_from(const QDir& sys_dir)
@@ -367,9 +395,6 @@ auto mp::platform::detail::get_network_interfaces_from(const QDir& sys_dir)
 
 QString mp::platform::interpret_setting(const QString& key, const QString& val)
 {
-    if (key == hotkey_key)
-        return mp::platform::interpret_hotkey(val);
-
     // this should not happen (settings should have found it to be an invalid key)
     throw InvalidSettingException(key, val, "Setting unavailable on Linux");
 }
@@ -379,18 +404,6 @@ void mp::platform::sync_winterm_profiles()
     // NOOP on Linux
 }
 
-QString mp::platform::autostart_test_data()
-{
-    return autostart_filename;
-}
-
-void mp::platform::setup_gui_autostart_prerequisites()
-{
-    const auto config_dir = QDir{MP_STDPATHS.writableLocation(StandardPaths::GenericConfigLocation)};
-    const auto link_dir = QDir{config_dir.absoluteFilePath("autostart")};
-    mu::link_autostart_file(link_dir, mp::client_name, autostart_filename);
-}
-
 std::string mp::platform::default_server_address()
 {
     std::string base_dir;
@@ -398,7 +411,7 @@ std::string mp::platform::default_server_address()
     try
     {
         // if Snap, client and daemon can both access $SNAP_COMMON so can put socket there
-        base_dir = mu::snap_common_dir().toStdString();
+        base_dir = mpu::snap_common_dir().toStdString();
     }
     catch (const mp::SnapEnvironmentException&)
     {
@@ -410,7 +423,7 @@ std::string mp::platform::default_server_address()
 mp::VirtualMachineFactory::UPtr mp::platform::vm_backend(const mp::Path& data_dir)
 {
     const auto& driver = MP_SETTINGS.get(mp::driver_key);
-#if QEMU_ENABLED
+#ifdef QEMU_ENABLED
     if (driver == QStringLiteral("qemu"))
         return std::make_unique<QemuVirtualMachineFactory>(data_dir);
 #endif
@@ -441,12 +454,11 @@ mp::UpdatePrompt::UPtr mp::platform::make_update_prompt()
 
 mp::logging::Logger::UPtr mp::platform::make_logger(mp::logging::Level level)
 {
+#if MULTIPASS_JOURNALD_ENABLED
     return std::make_unique<logging::JournaldLogger>(level);
-}
-
-bool mp::platform::is_image_url_supported()
-{
-    return true;
+#else
+    return std::make_unique<logging::SyslogLogger>(level);
+#endif
 }
 
 std::string mp::platform::reinterpret_interface_id(const std::string& ux_id)
@@ -456,6 +468,6 @@ std::string mp::platform::reinterpret_interface_id(const std::string& ux_id)
 
 std::string multipass::platform::host_version()
 {
-    return mu::in_multipass_snap() ? multipass::platform::detail::read_os_release()
-                                   : fmt::format("{}-{}", QSysInfo::productType(), QSysInfo::productVersion());
+    return mpu::in_multipass_snap() ? multipass::platform::detail::read_os_release()
+                                    : fmt::format("{}-{}", QSysInfo::productType(), QSysInfo::productVersion());
 }

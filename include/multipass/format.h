@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,8 +20,7 @@
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
-
-#include <filesystem>
+#include <fmt/ranges.h>
 
 #include <QByteArray>
 #include <QProcess>

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,6 +28,7 @@
 #include <QFuture>
 
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 
 namespace multipass
@@ -44,38 +45,45 @@ public:
 class DefaultVMImageVault final : public BaseVMImageVault
 {
 public:
-    DefaultVMImageVault(std::vector<VMImageHost*> image_host, URLDownloader* downloader, multipass::Path cache_dir_path,
-                        multipass::Path data_dir_path, multipass::days days_to_expire);
+    DefaultVMImageVault(std::vector<VMImageHost*> image_host,
+                        URLDownloader* downloader,
+                        const multipass::Path& cache_dir_path,
+                        const multipass::Path& data_dir_path,
+                        const multipass::days& days_to_expire);
     ~DefaultVMImageVault();
 
-    VMImage fetch_image(const FetchType& fetch_type, const Query& query, const PrepareAction& prepare,
-                        const ProgressMonitor& monitor) override;
+    VMImage fetch_image(const FetchType& fetch_type,
+                        const Query& query,
+                        const PrepareAction& prepare,
+                        const ProgressMonitor& monitor,
+                        const bool unlock,
+                        const std::optional<std::string>& checksum,
+                        const Path& save_dir) override;
     void remove(const std::string& name) override;
     bool has_record_for(const std::string& name) override;
     void prune_expired_images() override;
     void update_images(const FetchType& fetch_type, const PrepareAction& prepare,
                        const ProgressMonitor& monitor) override;
     MemorySize minimum_image_size_for(const std::string& id) override;
+    void clone(const std::string& source_instance_name, const std::string& destination_instance_name) override;
 
 private:
-    VMImage image_instance_from(const std::string& name, const VMImage& prepared_image);
+    VMImage image_instance_from(const VMImage& prepared_image, const Path& dest_dir);
     VMImage download_and_prepare_source_image(const VMImageInfo& info, std::optional<VMImage>& existing_source_image,
                                               const QDir& image_dir, const FetchType& fetch_type,
                                               const PrepareAction& prepare, const ProgressMonitor& monitor);
-    QString extract_image_from(const std::string& instance_name, const VMImage& source_image,
-                               const ProgressMonitor& monitor);
-    VMImage fetch_kernel_and_initrd(const VMImageInfo& info, const VMImage& source_image, const QDir& image_dir,
-                                    const ProgressMonitor& monitor);
+    QString extract_image_from(const VMImage& source_image, const ProgressMonitor& monitor, const Path& dest_dir);
     std::optional<QFuture<VMImage>> get_image_future(const std::string& id);
-    VMImage finalize_image_records(const Query& query, const VMImage& prepared_image, const std::string& id);
-    VMImageInfo get_kernel_query_info(const std::string& name);
+    VMImage finalize_image_records(const Query& query,
+                                   const VMImage& prepared_image,
+                                   const std::string& id,
+                                   const Path& dest_dir);
     void persist_image_records();
     void persist_instance_records();
 
     URLDownloader* const url_downloader;
     const QDir cache_dir;
     const QDir data_dir;
-    const QDir instances_dir;
     const QDir images_dir;
     const days days_to_expire;
     std::mutex fetch_mutex;

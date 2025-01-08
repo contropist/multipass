@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,13 +23,11 @@
 #include <multipass/client_cert_store.h>
 #include <multipass/constants.h>
 #include <multipass/default_vm_blueprint_provider.h>
-#include <multipass/exceptions/not_implemented_on_this_backend_exception.h>
 #include <multipass/logging/log.h>
 #include <multipass/logging/standard_logger.h>
 #include <multipass/name_generator.h>
 #include <multipass/platform.h>
 #include <multipass/ssh/openssh_key_provider.h>
-#include <multipass/sshfs_mount/sshfs_mount_handler.h>
 #include <multipass/ssl_cert_provider.h>
 #include <multipass/standard_paths.h>
 #include <multipass/utils.h>
@@ -66,7 +64,7 @@ std::unique_ptr<QNetworkProxy> discover_http_proxy()
     QString http_proxy{qgetenv("http_proxy")};
     if (http_proxy.isEmpty())
     {
-        // Some OS's are case senstive
+        // Some OS's are case sensitive
         http_proxy = qgetenv("HTTP_PROXY");
     }
 
@@ -111,21 +109,24 @@ std::unique_ptr<const mp::DaemonConfig> mp::DaemonConfigBuilder::build()
     mpl::set_logger(multiplexing_logger);
 
     auto storage_path = MP_PLATFORM.multipass_storage_location();
+    if (!storage_path.isEmpty())
+        MP_UTILS.make_dir(storage_path, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 
     if (cache_directory.isEmpty())
     {
         if (!storage_path.isEmpty())
-            cache_directory = mp::utils::make_dir(storage_path, "cache");
+            cache_directory = MP_UTILS.make_dir(storage_path, "cache");
         else
             cache_directory = MP_STDPATHS.writableLocation(StandardPaths::CacheLocation);
     }
     if (data_directory.isEmpty())
     {
         if (!storage_path.isEmpty())
-            data_directory = mp::utils::make_dir(storage_path, "data");
+            data_directory = MP_UTILS.make_dir(storage_path, "data");
         else
             data_directory = MP_STDPATHS.writableLocation(StandardPaths::AppDataLocation);
     }
+
     if (url_downloader == nullptr)
         url_downloader = std::make_unique<URLDownloader>(cache_directory, std::chrono::seconds{10});
     if (factory == nullptr)
@@ -134,16 +135,18 @@ std::unique_ptr<const mp::DaemonConfig> mp::DaemonConfigBuilder::build()
         update_prompt = platform::make_update_prompt();
     if (image_hosts.empty())
     {
-        image_hosts.push_back(std::make_unique<mp::CustomVMImageHost>(QSysInfo::currentCpuArchitecture(),
-                                                                      url_downloader.get(), manifest_ttl));
+        image_hosts.push_back(
+            std::make_unique<mp::CustomVMImageHost>(QSysInfo::currentCpuArchitecture(), url_downloader.get()));
         image_hosts.push_back(std::make_unique<mp::UbuntuVMImageHost>(
             std::vector<std::pair<std::string, UbuntuVMImageRemote>>{
                 {mp::release_remote, UbuntuVMImageRemote{"https://cloud-images.ubuntu.com/", "releases/",
                                                          std::make_optional<QString>(mp::mirror_key)}},
                 {mp::daily_remote, UbuntuVMImageRemote{"https://cloud-images.ubuntu.com/", "daily/",
                                                        std::make_optional<QString>(mp::mirror_key)}},
+                {mp::snapcraft_remote, UbuntuVMImageRemote{"https://cloud-images.ubuntu.com/", "buildd/daily/",
+                                                           std::make_optional<QString>(mp::mirror_key)}},
                 {mp::appliance_remote, UbuntuVMImageRemote{"https://cdimage.ubuntu.com/", "ubuntu-core/appliances/"}}},
-            url_downloader.get(), manifest_ttl));
+            url_downloader.get()));
     }
     if (vault == nullptr)
     {
@@ -154,7 +157,7 @@ std::unique_ptr<const mp::DaemonConfig> mp::DaemonConfigBuilder::build()
         }
 
         vault = factory->create_image_vault(
-            hosts, url_downloader.get(), mp::utils::make_dir(cache_directory, factory->get_backend_directory_name()),
+            hosts, url_downloader.get(), MP_UTILS.make_dir(cache_directory, factory->get_backend_directory_name()),
             mp::utils::backend_directory_path(data_directory, factory->get_backend_directory_name()), days_to_expire);
     }
     if (name_generator == nullptr)
@@ -164,7 +167,7 @@ std::unique_ptr<const mp::DaemonConfig> mp::DaemonConfigBuilder::build()
     if (ssh_key_provider == nullptr)
         ssh_key_provider = std::make_unique<OpenSSHKeyProvider>(data_directory);
     if (cert_provider == nullptr)
-        cert_provider = std::make_unique<mp::SSLCertProvider>(mp::utils::make_dir(data_directory, "certificates"),
+        cert_provider = std::make_unique<mp::SSLCertProvider>(MP_UTILS.make_dir(data_directory, "certificates"),
                                                               server_name_from(server_address));
     if (client_cert_store == nullptr)
         client_cert_store = std::make_unique<mp::ClientCertStore>(data_directory);
@@ -186,25 +189,9 @@ std::unique_ptr<const mp::DaemonConfig> mp::DaemonConfigBuilder::build()
                 std::make_unique<DefaultVMBlueprintProvider>(url_downloader.get(), cache_directory, manifest_ttl);
     }
 
-    if (mount_handlers.empty())
-    {
-        mount_handlers[mp::VMMount::MountType::Classic] = std::make_unique<SSHFSMountHandler>(*ssh_key_provider);
-
-        try
-        {
-            mount_handlers[mp::VMMount::MountType::Native] =
-                factory->create_performance_mount_handler(*ssh_key_provider);
-        }
-        catch (const NotImplementedOnThisBackendException& e)
-        {
-            mpl::log(mpl::Level::info, "daemon_config",
-                     fmt::format("Cannot set performance mount handler: {}", e.what()));
-        }
-    }
-
     return std::unique_ptr<const DaemonConfig>(new DaemonConfig{
         std::move(url_downloader), std::move(factory), std::move(image_hosts), std::move(vault),
         std::move(name_generator), std::move(ssh_key_provider), std::move(cert_provider), std::move(client_cert_store),
         std::move(update_prompt), multiplexing_logger, std::move(network_proxy), std::move(blueprint_provider),
-        std::move(mount_handlers), cache_directory, data_directory, server_address, ssh_username, image_refresh_timer});
+        cache_directory, data_directory, server_address, ssh_username, image_refresh_timer});
 }

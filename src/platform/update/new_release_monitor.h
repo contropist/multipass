@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -45,7 +45,7 @@ class NewReleaseMonitor : public QObject
 {
     Q_OBJECT
 public:
-    static constexpr auto default_update_url = "https://multipass.run/static/latest-release.json";
+    static constexpr auto default_update_url = "https://canonical.com/static/files/latest-multipass-releases.json";
 
     NewReleaseMonitor(const QString& current_version, std::chrono::steady_clock::duration refresh_rate,
                       const QString& update_url = default_update_url);

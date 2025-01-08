@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -107,13 +107,10 @@ TEST_F(DNSMasqServer, finds_ip)
     auto dns = make_default_dnsmasq_server();
     make_lease_entry();
 
-    auto ip_and_host = dns.get_ip_and_host_for(hw_addr);
+    auto ip = dns.get_ip_for(hw_addr);
 
-    ASSERT_TRUE(ip_and_host);
-
-    auto [ip, host] = ip_and_host.value();
-    EXPECT_EQ(ip, mp::IPAddress(expected_ip));
-    EXPECT_EQ(host, "dummy_name");
+    ASSERT_TRUE(ip);
+    EXPECT_EQ(ip.value(), mp::IPAddress(expected_ip));
 }
 
 TEST_F(DNSMasqServer, returns_null_ip_when_leases_file_does_not_exist)
@@ -121,53 +118,53 @@ TEST_F(DNSMasqServer, returns_null_ip_when_leases_file_does_not_exist)
     auto dns = make_default_dnsmasq_server();
 
     const std::string hw_addr{"00:01:02:03:04:05"};
-    auto ip_and_host = dns.get_ip_and_host_for(hw_addr);
+    auto ip = dns.get_ip_for(hw_addr);
 
-    EXPECT_FALSE(ip_and_host);
+    EXPECT_FALSE(ip);
 }
 
 TEST_F(DNSMasqServer, release_mac_releases_ip)
 {
-    const QString dchp_release_called{QDir{data_dir.path()}.filePath("dhcp_release_called")};
+    const QString dhcp_release_called{QDir{data_dir.path()}.filePath("dhcp_release_called")};
 
-    mp::DNSMasqServer dns{data_dir.path(), dchp_release_called, subnet};
+    mp::DNSMasqServer dns{data_dir.path(), dhcp_release_called, subnet};
     make_lease_entry();
 
     dns.release_mac(hw_addr);
 
-    EXPECT_TRUE(QFile::exists(dchp_release_called));
+    EXPECT_TRUE(QFile::exists(dhcp_release_called));
 }
 
 TEST_F(DNSMasqServer, release_mac_logs_failure_on_missing_ip)
 {
-    const QString dchp_release_called{QDir{data_dir.path()}.filePath("dhcp_release_called")};
+    const QString dhcp_release_called{QDir{data_dir.path()}.filePath("dhcp_release_called")};
 
-    mp::DNSMasqServer dns{data_dir.path(), dchp_release_called, subnet};
+    mp::DNSMasqServer dns{data_dir.path(), dhcp_release_called, subnet};
     dns.release_mac(hw_addr);
 
-    EXPECT_FALSE(QFile::exists(dchp_release_called));
+    EXPECT_FALSE(QFile::exists(dhcp_release_called));
     EXPECT_TRUE(logger->logged_lines.size() > 0);
 }
 
 TEST_F(DNSMasqServer, release_mac_logs_failures)
 {
-    const QString dchp_release_called{QDir{data_dir.path()}.filePath("dhcp_release_called.fail")};
+    const QString dhcp_release_called{QDir{data_dir.path()}.filePath("dhcp_release_called.fail")};
 
-    mp::DNSMasqServer dns{data_dir.path(), dchp_release_called, subnet};
+    mp::DNSMasqServer dns{data_dir.path(), dhcp_release_called, subnet};
     make_lease_entry();
 
     dns.release_mac(hw_addr);
 
-    EXPECT_TRUE(QFile::exists(dchp_release_called));
+    EXPECT_TRUE(QFile::exists(dhcp_release_called));
     EXPECT_TRUE(logger->logged_lines.size() > 0);
 }
 
 TEST_F(DNSMasqServer, release_mac_crashes_logs_failure)
 {
-    const QString dchp_release_called{QDir{data_dir.path()}.filePath("dhcp_release_called")};
+    const QString dhcp_release_called{QDir{data_dir.path()}.filePath("dhcp_release_called")};
     const std::string crash_hw_addr{"00:00:00:00:00:00"};
 
-    mp::DNSMasqServer dns{data_dir.path(), dchp_release_called, subnet};
+    mp::DNSMasqServer dns{data_dir.path(), dhcp_release_called, subnet};
     make_lease_entry(crash_hw_addr);
 
     dns.release_mac(crash_hw_addr);

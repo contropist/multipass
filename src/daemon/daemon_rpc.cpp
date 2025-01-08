@@ -1,5 +1,5 @@
 ﻿/*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -137,6 +137,12 @@ mp::DaemonRpc::DaemonRpc(const std::string& server_address, const CertProvider& 
     mpl::log(mpl::Level::info, category, fmt::format("gRPC listening on {}", server_address));
 }
 
+void mp::DaemonRpc::shutdown_and_wait()
+{
+    server->Shutdown();
+    server->Wait();
+}
+
 grpc::Status mp::DaemonRpc::create(grpc::ServerContext* context,
                                    grpc::ServerReaderWriter<CreateReply, CreateRequest>* server)
 {
@@ -192,6 +198,19 @@ grpc::Status mp::DaemonRpc::list(grpc::ServerContext* context, grpc::ServerReade
 
     return verify_client_and_dispatch_operation(
         std::bind(&DaemonRpc::on_list, this, &request, server, std::placeholders::_1), client_cert_from(context));
+}
+
+grpc::Status mp::DaemonRpc::clone(grpc::ServerContext* context,
+                                  grpc::ServerReaderWriter<CloneReply, CloneRequest>* server)
+{
+    CloneRequest request;
+    server->Read(&request);
+
+    auto adapted_on_clone = [this, &request, server](auto&& arg) -> void {
+        this->on_clone(&request, server, std::forward<decltype(arg)>(arg));
+    };
+
+    return verify_client_and_dispatch_operation(adapted_on_clone, client_cert_from(context));
 }
 
 grpc::Status mp::DaemonRpc::networks(grpc::ServerContext* context,
@@ -364,6 +383,39 @@ grpc::Status mp::DaemonRpc::keys(grpc::ServerContext* context, grpc::ServerReade
 
     return verify_client_and_dispatch_operation(
         std::bind(&DaemonRpc::on_keys, this, &request, server, std::placeholders::_1), client_cert_from(context));
+}
+
+grpc::Status mp::DaemonRpc::snapshot(grpc::ServerContext* context,
+                                     grpc::ServerReaderWriter<SnapshotReply, SnapshotRequest>* server)
+{
+    SnapshotRequest request;
+    server->Read(&request);
+
+    return verify_client_and_dispatch_operation(
+        std::bind(&DaemonRpc::on_snapshot, this, &request, server, std::placeholders::_1),
+        client_cert_from(context));
+}
+
+grpc::Status mp::DaemonRpc::restore(grpc::ServerContext* context,
+                                    grpc::ServerReaderWriter<RestoreReply, RestoreRequest>* server)
+{
+    RestoreRequest request;
+    server->Read(&request);
+
+    return verify_client_and_dispatch_operation(
+        std::bind(&DaemonRpc::on_restore, this, &request, server, std::placeholders::_1),
+        client_cert_from(context));
+}
+
+grpc::Status mp::DaemonRpc::daemon_info(grpc::ServerContext* context,
+                                        grpc::ServerReaderWriter<DaemonInfoReply, DaemonInfoRequest>* server)
+{
+    DaemonInfoRequest request;
+    server->Read(&request);
+
+    return verify_client_and_dispatch_operation(
+        std::bind(&DaemonRpc::on_daemon_info, this, &request, server, std::placeholders::_1),
+        client_cert_from(context));
 }
 
 template <typename OperationSignal>

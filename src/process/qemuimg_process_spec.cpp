@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,7 +20,7 @@
 #include <multipass/snap_utils.h>
 
 namespace mp = multipass;
-namespace mu = multipass::utils;
+namespace mpu = multipass::utils;
 
 mp::QemuImgProcessSpec::QemuImgProcessSpec(const QStringList& args, const QString& source_image,
                                            const QString& target_image)
@@ -45,6 +45,7 @@ QString mp::QemuImgProcessSpec::apparmor_profile() const
 profile %1 flags=(attach_disconnected) {
   #include <abstractions/base>
 
+  capability ipc_lock,
   capability dac_read_search,
   %2
 
@@ -71,7 +72,7 @@ profile %1 flags=(attach_disconnected) {
 
     try
     {
-        root_dir = mu::snap_dir();
+        root_dir = mpu::snap_dir();
         signal_peer = "snap.multipass.multipassd"; // only multipassd can send qemu-img signals
     }
     catch (mp::SnapEnvironmentException&)
@@ -82,7 +83,7 @@ profile %1 flags=(attach_disconnected) {
     }
 
     if (!source_image.isEmpty())
-        images.append(QString("  %1 rk,\n").arg(source_image));
+        images.append(QString("  %1 rwk,\n").arg(source_image)); // allow amending to qcow2 v3
 
     if (!target_image.isEmpty())
         images.append(QString("  %1 rwk,\n").arg(target_image));

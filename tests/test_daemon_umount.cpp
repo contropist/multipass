@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -36,16 +36,14 @@ struct TestDaemonUmount : public mpt::DaemonTestFixture
 {
     void SetUp() override
     {
-        EXPECT_CALL(mock_settings, register_handler(_)).WillRepeatedly(Return(nullptr));
+        EXPECT_CALL(mock_settings, register_handler).WillRepeatedly(Return(nullptr));
         EXPECT_CALL(mock_settings, unregister_handler).Times(AnyNumber());
 
-        config_builder.mount_handlers.clear();
         config_builder.vault = std::make_unique<NiceMock<mpt::MockVMImageVault>>();
 
         mock_factory = use_a_mock_vm_factory();
     }
 
-    std::unique_ptr<mpt::MockMountHandler> mock_mount_handler{std::make_unique<mpt::MockMountHandler>()};
     mpt::MockVirtualMachineFactory* mock_factory;
 
     const std::string mock_instance_name{"real-zebraphant"};
@@ -64,10 +62,9 @@ struct TestDaemonUmount : public mpt::DaemonTestFixture
 
 TEST_F(TestDaemonUmount, missingInstanceFails)
 {
-    const std::string& fake_instance{"fake"};
-
     mp::Daemon daemon{config_builder.build()};
 
+    const auto fake_instance = "fake";
     mp::UmountRequest request;
     auto entry = request.add_target_paths();
     entry->set_instance_name(fake_instance);
@@ -76,21 +73,32 @@ TEST_F(TestDaemonUmount, missingInstanceFails)
                                    StrictMock<mpt::MockServerReaderWriter<mp::UmountReply, mp::UmountRequest>>{});
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("instance \"{}\" does not exist", fake_instance)));
+    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("instance '{}' does not exist", fake_instance)));
 }
 
 TEST_F(TestDaemonUmount, noTargetsUnmountsAll)
 {
-    const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
+    std::unordered_map<std::string, mp::VMMount> mounts{
+        {fake_target_path, {"foo", {}, {}, mp::VMMount::MountType::Native}},
+        {fake_target_path + "2", {"foo2", {}, {}, mp::VMMount::MountType::Native}}};
+
+    const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces, mounts));
     config_builder.data_directory = temp_dir->path();
 
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
+    auto mock_mount_handler = std::make_unique<mpt::MockMountHandler>();
+    auto mock_mount_handler2 = std::make_unique<mpt::MockMountHandler>();
+    EXPECT_CALL(*mock_mount_handler, is_active).WillOnce(Return(true));
+    EXPECT_CALL(*mock_mount_handler2, is_active).WillOnce(Return(true));
+    EXPECT_CALL(*mock_mount_handler, deactivate_impl(false));
+    EXPECT_CALL(*mock_mount_handler2, deactivate_impl(false));
 
-    EXPECT_CALL(*mock_mount_handler, stop_all_mounts_for_instance(mock_instance_name)).Times(2);
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
+    auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path, _))
+        .WillOnce(Return(std::move(mock_mount_handler)));
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path + "2", _))
+        .WillOnce(Return(std::move(mock_mount_handler2)));
+
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
 
     mp::Daemon daemon{config_builder.build()};
 
@@ -104,21 +112,35 @@ TEST_F(TestDaemonUmount, noTargetsUnmountsAll)
     EXPECT_TRUE(status.ok());
 }
 
-TEST_F(TestDaemonUmount, unmountsMountedTargetWhenInstanceRunning)
+TEST_F(TestDaemonUmount, umountWithTargetOnlyStopsItsHandlers)
 {
-    std::unordered_map<std::string, mp::VMMount> mounts;
-    mounts.emplace(fake_target_path, mp::VMMount{"foo", {}, {}, mp::VMMount::MountType::Classic});
+    std::unordered_map<std::string, mp::VMMount> mounts{
+        {fake_target_path, {"foo", {}, {}, mp::VMMount::MountType::Native}},
+        {fake_target_path + "2", {"foo2", {}, {}, mp::VMMount::MountType::Native}},
+        {fake_target_path + "3", {"foo3", {}, {}, mp::VMMount::MountType::Native}}};
 
     const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces, mounts));
     config_builder.data_directory = temp_dir->path();
 
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
+    auto mock_mount_handler = std::make_unique<mpt::MockMountHandler>();
+    auto mock_mount_handler2 = std::make_unique<mpt::MockMountHandler>();
+    auto mock_mount_handler3 = std::make_unique<mpt::MockMountHandler>();
+    EXPECT_CALL(*mock_mount_handler, is_active).WillOnce(Return(true));
+    EXPECT_CALL(*mock_mount_handler2, is_active).Times(0);
+    EXPECT_CALL(*mock_mount_handler3, is_active).WillOnce(Return(true));
+    EXPECT_CALL(*mock_mount_handler, deactivate_impl(false));
+    EXPECT_CALL(*mock_mount_handler2, deactivate_impl(false)).Times(0);
+    EXPECT_CALL(*mock_mount_handler3, deactivate_impl(false));
 
-    EXPECT_CALL(*mock_mount_handler, stop_mount(mock_instance_name, fake_target_path)).Times(1);
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
+    auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path, _))
+        .WillOnce(Return(std::move(mock_mount_handler)));
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path + "2", _))
+        .WillOnce(Return(std::move(mock_mount_handler2)));
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path + "3", _))
+        .WillOnce(Return(std::move(mock_mount_handler3)));
+
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
 
     mp::Daemon daemon{config_builder.build()};
 
@@ -126,6 +148,9 @@ TEST_F(TestDaemonUmount, unmountsMountedTargetWhenInstanceRunning)
     auto entry = request.add_target_paths();
     entry->set_instance_name(mock_instance_name);
     entry->set_target_path(fake_target_path);
+    auto entry2 = request.add_target_paths();
+    entry2->set_instance_name(mock_instance_name);
+    entry2->set_target_path(fake_target_path + "3");
 
     auto status = call_daemon_slot(daemon, &mp::Daemon::umount, request,
                                    StrictMock<mpt::MockServerReaderWriter<mp::UmountReply, mp::UmountRequest>>{});
@@ -133,18 +158,13 @@ TEST_F(TestDaemonUmount, unmountsMountedTargetWhenInstanceRunning)
     EXPECT_TRUE(status.ok());
 }
 
-TEST_F(TestDaemonUmount, mountNotFoundInDatabaseHasError)
+TEST_F(TestDaemonUmount, mountNotFound)
 {
     const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
     config_builder.data_directory = temp_dir->path();
 
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
-
-    EXPECT_CALL(*mock_mount_handler, stop_mount(mock_instance_name, fake_target_path)).Times(0);
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
+        .WillOnce(Return(std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name)));
 
     mp::Daemon daemon{config_builder.build()};
 
@@ -157,35 +177,39 @@ TEST_F(TestDaemonUmount, mountNotFoundInDatabaseHasError)
                                    StrictMock<mpt::MockServerReaderWriter<mp::UmountReply, mp::UmountRequest>>{});
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("\"{}\" not found in database", fake_target_path)));
+    EXPECT_THAT(status.error_message(),
+                HasSubstr(fmt::format("path \"{}\" is not mounted in '{}'", fake_target_path, mock_instance_name)));
 }
 
-TEST_F(TestDaemonUmount, invalidMountTypeHasError)
+TEST_F(TestDaemonUmount, stoppingMountFails)
 {
-    std::unordered_map<std::string, mp::VMMount> mounts;
-    mounts.emplace(fake_target_path, mp::VMMount{"foo", {}, {}, static_cast<multipass::VMMount::MountType>(2)});
+    std::unordered_map<std::string, mp::VMMount> mounts{
+        {fake_target_path, {"foo", {}, {}, mp::VMMount::MountType::Native}}};
 
     const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces, mounts));
     config_builder.data_directory = temp_dir->path();
 
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
+    auto error = "device is busy";
+    auto mock_mount_handler = std::make_unique<mpt::MockMountHandler>();
+    EXPECT_CALL(*mock_mount_handler, is_active).WillOnce(Return(true));
+    EXPECT_CALL(*mock_mount_handler, deactivate_impl(false)).WillOnce(Throw(std::runtime_error{error}));
 
-    EXPECT_CALL(*mock_mount_handler, stop_mount(mock_instance_name, fake_target_path)).Times(0);
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
+    auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
+    EXPECT_CALL(*mock_vm, make_native_mount_handler(fake_target_path, _))
+        .WillOnce(Return(std::move(mock_mount_handler)));
+
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
 
     mp::Daemon daemon{config_builder.build()};
 
     mp::UmountRequest request;
     auto entry = request.add_target_paths();
     entry->set_instance_name(mock_instance_name);
-    entry->set_target_path(fake_target_path);
 
     auto status = call_daemon_slot(daemon, &mp::Daemon::umount, request,
                                    StrictMock<mpt::MockServerReaderWriter<mp::UmountReply, mp::UmountRequest>>{});
 
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
-    EXPECT_THAT(status.error_message(), HasSubstr("Cannot unmount: Invalid mount type stored in the database."));
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("failed to unmount \"{}\" from '{}': {}",
+                                                              fake_target_path, mock_instance_name, error)));
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
 
 #include "common.h"
 #include "mock_ssh_test_fixture.h"
+#include "stub_ssh_key_provider.h"
 
 #include <multipass/ssh/ssh_session.h>
 
@@ -32,8 +33,9 @@ namespace
 {
 struct SSHProcess : public Test
 {
+    const mpt::StubSSHKeyProvider key_provider;
     mpt::MockSSHTestFixture mock_ssh_test_fixture;
-    mp::SSHSession session{"theanswertoeverything", 42};
+    mp::SSHSession session{"theanswertoeverything", 42, "ubuntu", key_provider};
 };
 } // namespace
 

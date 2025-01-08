@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,6 +27,8 @@ namespace multipass
 {
 constexpr auto client_name = "multipass";
 constexpr auto daemon_name = "multipassd";
+
+constexpr auto snapcraft_remote = "snapcraft";
 
 constexpr auto min_memory_size = "128M";
 constexpr auto min_disk_size = "512M";
@@ -56,16 +58,15 @@ constexpr auto driver_key = "local.driver";         // idem
 constexpr auto passphrase_key = "local.passphrase"; // idem
 constexpr auto bridged_interface_key = "local.bridged-network";       // idem
 constexpr auto mounts_key = "local.privileged-mounts";                // idem
-constexpr auto autostart_key = "client.gui.autostart";                // idem
 constexpr auto winterm_key = "client.apps.windows-terminal.profiles"; // idem
-constexpr auto hotkey_key = "client.gui.hotkey";                      // idem
 constexpr auto mirror_key = "local.image.mirror";                     // idem; this defines the mirror of simple streams
 
+constexpr auto cloud_init_file_name = "cloud-init-config.iso";
+
 [[maybe_unused]] // hands off clang-format
-constexpr auto key_examples = {autostart_key, driver_key, mounts_key};
+constexpr auto key_examples = {petenv_key, driver_key, mounts_key};
 
 constexpr auto petenv_default = "primary";
-constexpr auto hotkey_default = "Ctrl+Alt+U";                         // idem; translates to Cmd+Opt+U on macOS
 
 constexpr auto timeout_exit_code = 5;
 

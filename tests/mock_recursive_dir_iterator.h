@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -63,6 +63,12 @@ struct MockDirectoryEntry : public DirectoryEntry
 };
 
 struct MockRecursiveDirIterator : public RecursiveDirIterator
+{
+    MOCK_METHOD(bool, hasNext, (), (override));
+    MOCK_METHOD(const DirectoryEntry&, next, (), (override));
+};
+
+struct MockDirIterator : public DirIterator
 {
     MOCK_METHOD(bool, hasNext, (), (override));
     MOCK_METHOD(const DirectoryEntry&, next, (), (override));

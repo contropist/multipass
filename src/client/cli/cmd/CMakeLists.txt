@@ -1,4 +1,4 @@
-# Copyright © 2017-2022 Canonical Ltd.
+# Copyright (C) Canonical, Ltd.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 3 as
@@ -17,6 +17,7 @@ add_library(commands STATIC
   aliases.cpp
   animated_spinner.cpp
   authenticate.cpp
+  clone.cpp
   common_cli.cpp
   create_alias.cpp
   delete.cpp
@@ -29,12 +30,15 @@ add_library(commands STATIC
   list.cpp
   mount.cpp
   networks.cpp
+  prefer.cpp
   purge.cpp
   recover.cpp
   remote_settings_handler.cpp
   restart.cpp
+  restore.cpp
   set.cpp
   shell.cpp
+  snapshot.cpp
   start.cpp
   stop.cpp
   suspend.cpp
@@ -51,7 +55,7 @@ target_link_libraries(commands
   ssh_client
   rpc
   settings
-  Qt5::Core
-  Qt5::Network
+  Qt6::Core
+  Qt6::Network
   utils
   yaml)

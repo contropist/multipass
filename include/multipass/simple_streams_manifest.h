@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -42,6 +42,8 @@ struct SimpleStreamsManifest
     const QString updated_at;
     const std::vector<VMImageInfo> products;
     const QMap<QString, const VMImageInfo*> image_records;
+
+    SimpleStreamsManifest(const QString& updated_at, std::vector<VMImageInfo>&& images);
 };
 } // namespace multipass
 #endif // MULTIPASS_SIMPLE_STREAMS_MANIFEST_H

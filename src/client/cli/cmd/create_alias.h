@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,12 +21,15 @@
 #include <multipass/cli/alias_dict.h>
 #include <multipass/cli/return_codes.h>
 
+#include <optional>
+
 namespace multipass
 {
 namespace cmd
 {
 ReturnCode create_alias(AliasDict& aliases, const std::string& alias_name, const AliasDefinition& alias_definition,
-                        std::ostream& cout, std::ostream& cerr);
+                        std::ostream& cout, std::ostream& cerr,
+                        const std::optional<std::string>& context = std::nullopt);
 } // namespace cmd
 } // namespace multipass
 

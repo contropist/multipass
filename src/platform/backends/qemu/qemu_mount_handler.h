@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,26 +18,28 @@
 #ifndef MULTIPASS_QEMU_MOUNT_HANDLER_H
 #define MULTIPASS_QEMU_MOUNT_HANDLER_H
 
+#include "qemu_virtual_machine.h"
+
 #include <multipass/mount_handler.h>
 
 namespace multipass
 {
-class VirtualMachine;
-
 class QemuMountHandler : public MountHandler
 {
 public:
-    explicit QemuMountHandler(const SSHKeyProvider& ssh_key_provider);
+    QemuMountHandler(QemuVirtualMachine* vm,
+                     const SSHKeyProvider* ssh_key_provider,
+                     const std::string& target,
+                     VMMount mount_spec);
+    ~QemuMountHandler() override;
 
-    void init_mount(VirtualMachine* vm, const std::string& target_path, const VMMount& vm_mount) override;
-    void start_mount(VirtualMachine* vm, ServerVariant server, const std::string& target_path,
-                     const std::chrono::milliseconds& timeout = std::chrono::minutes(5)) override;
-    void stop_mount(const std::string& instance, const std::string& path) override;
-    void stop_all_mounts_for_instance(const std::string& instance) override;
-    bool has_instance_already_mounted(const std::string& instance, const std::string& path) const override;
+    void activate_impl(ServerVariant server, std::chrono::milliseconds timeout) override;
+    void deactivate_impl(bool force) override;
+    bool is_active() override;
 
 private:
-    std::unordered_map<std::string, std::unordered_map<std::string, VirtualMachine*>> mounts;
+    QemuVirtualMachine::MountArgs& vm_mount_args;
+    std::string tag;
 };
 
 } // namespace multipass

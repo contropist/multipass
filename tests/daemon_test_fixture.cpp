@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -15,7 +15,9 @@
  *
  */
 
+// This header contains premock code so it must be included first.
 #include "daemon_test_fixture.h"
+
 #include "common.h"
 #include "file_operations.h"
 #include "mock_cert_provider.h"
@@ -24,7 +26,6 @@
 #include "stub_cert_store.h"
 #include "stub_image_host.h"
 #include "stub_logger.h"
-#include "stub_mount_handler.h"
 #include "stub_ssh_key_provider.h"
 #include "stub_terminal.h"
 #include "stub_virtual_machine_factory.h"
@@ -315,12 +316,11 @@ mpt::DaemonTestFixture::DaemonTestFixture()
     config_builder.factory = std::make_unique<StubVirtualMachineFactory>();
     config_builder.image_hosts.push_back(std::make_unique<StubVMImageHost>());
     config_builder.ssh_key_provider = std::make_unique<StubSSHKeyProvider>();
-    config_builder.cert_provider = std::make_unique<MockCertProvider>();
+    config_builder.cert_provider = std::make_unique<NiceMock<MockCertProvider>>();
     config_builder.client_cert_store = std::make_unique<StubCertStore>();
     config_builder.logger = std::make_unique<StubLogger>();
     config_builder.update_prompt = std::make_unique<DisabledUpdatePrompt>();
     config_builder.blueprint_provider = std::make_unique<StubVMBlueprintProvider>();
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::make_unique<StubMountHandler>();
 }
 
 void mpt::DaemonTestFixture::SetUp()
@@ -340,7 +340,7 @@ mpt::MockVirtualMachineFactory* mpt::DaemonTestFixture::use_a_mock_vm_factory()
 
     ON_CALL(*mock_factory_ptr, fetch_type()).WillByDefault(Return(FetchType::ImageOnly));
 
-    ON_CALL(*mock_factory_ptr, create_virtual_machine).WillByDefault([](const auto&, auto&) {
+    ON_CALL(*mock_factory_ptr, create_virtual_machine).WillByDefault([](auto&&...) {
         return std::make_unique<StubVirtualMachine>();
     });
 
@@ -373,7 +373,7 @@ void mpt::DaemonTestFixture::send_commands(std::vector<std::vector<std::string>>
         StubTerminal term(cout, cerr, cin);
 
         std::unique_ptr<CertProvider> cert_provider;
-        cert_provider = std::make_unique<MockCertProvider>();
+        cert_provider = std::make_unique<NiceMock<MockCertProvider>>();
 
         ClientConfig client_config{server_address, std::move(cert_provider), &term};
         TestClient client{client_config};
@@ -460,7 +460,7 @@ std::string mpt::DaemonTestFixture::fake_json_contents(const std::string& defaul
                                                             "                \"gid_mappings\": ["));
 
         QStringList gid_array_elements;
-        for (const auto& gid_pair : mount.gid_mappings)
+        for (const auto& gid_pair : mount.get_gid_mappings())
         {
             gid_array_elements += QString::fromStdString(fmt::format("\n                    {{\n"
                                                                      "                        \"host_gid\": {},\n"
@@ -471,15 +471,16 @@ std::string mpt::DaemonTestFixture::fake_json_contents(const std::string& defaul
         mount_element += gid_array_elements.join(',');
 
         mount_element += QString::fromStdString(fmt::format("\n                ],\n"
-                                                            "                \"source_path\": \"{}\",\n"
-                                                            "                \"target_path\": \"{}\",\n",
-                                                            mount.source_path, mountpoint));
+                                                            "                \"source_path\": {:?},\n"
+                                                            "                \"target_path\": {:?},\n",
+                                                            mount.get_source_path(),
+                                                            mountpoint));
         mount_element += QString::fromStdString(fmt::format("                \"mount_type\": {},\n"
                                                             "                \"uid_mappings\": [",
-                                                            mount.mount_type));
+                                                            mount.get_mount_type()));
 
         QStringList uid_array_elements;
-        for (const auto& uid_pair : mount.uid_mappings)
+        for (const auto& uid_pair : mount.get_uid_mappings())
         {
             uid_array_elements += QString::fromStdString(fmt::format("\n                    {{\n"
                                                                      "                        \"host_uid\": {},\n"
@@ -526,16 +527,18 @@ bool mpt::DaemonTestFixture::is_ready(std::future<R> const& f)
 }
 
 template <typename DaemonSlotPtr, typename Request, typename Server>
-grpc::Status mpt::DaemonTestFixture::call_daemon_slot(Daemon& daemon, DaemonSlotPtr slot, const Request& request,
+grpc::Status mpt::DaemonTestFixture::call_daemon_slot(Daemon& daemon,
+                                                      DaemonSlotPtr slot,
+                                                      const Request& request,
                                                       Server&& server)
 {
     std::promise<grpc::Status> status_promise;
     auto status_future = status_promise.get_future();
 
     auto thread = QThread::create([&daemon, slot, &request, &server, &status_promise] {
-        QEventLoop loop;
+        QEventLoop inner_loop;
         (daemon.*slot)(&request, &server, &status_promise);
-        loop.exec();
+        inner_loop.exec();
     });
 
     thread->start();
@@ -543,6 +546,7 @@ grpc::Status mpt::DaemonTestFixture::call_daemon_slot(Daemon& daemon, DaemonSlot
     EXPECT_TRUE(is_ready(status_future));
 
     thread->quit();
+    thread->wait();
 
     return status_future.get();
 }
@@ -636,3 +640,57 @@ template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
     void (mp::Daemon::*)(const mp::StartRequest*, grpc::ServerReaderWriterInterface<mp::StartReply, mp::StartRequest>*,
                          std::promise<grpc::Status>*),
     const mp::StartRequest&, StrictMock<mpt::MockServerReaderWriter<mp::StartReply, mp::StartRequest>>&&);
+template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
+    mp::Daemon&,
+    void (mp::Daemon::*)(const mp::InfoRequest*, grpc::ServerReaderWriterInterface<mp::InfoReply, mp::InfoRequest>*,
+                         std::promise<grpc::Status>*),
+    const mp::InfoRequest&, StrictMock<mpt::MockServerReaderWriter<mp::InfoReply, mp::InfoRequest>>&);
+template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
+    mp::Daemon&,
+    void (mp::Daemon::*)(const mp::SuspendRequest*,
+                         grpc::ServerReaderWriterInterface<mp::SuspendReply, mp::SuspendRequest>*,
+                         std::promise<grpc::Status>*),
+    const mp::SuspendRequest&,
+    StrictMock<mpt::MockServerReaderWriter<mp::SuspendReply, mp::SuspendRequest>>&&);
+template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
+    mp::Daemon&,
+    void (mp::Daemon::*)(const mp::SnapshotRequest*,
+                         grpc::ServerReaderWriterInterface<mp::SnapshotReply, mp::SnapshotRequest>*,
+                         std::promise<grpc::Status>*),
+    const mp::SnapshotRequest&,
+    StrictMock<mpt::MockServerReaderWriter<mp::SnapshotReply, mp::SnapshotRequest>>&);
+template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
+    mp::Daemon&,
+    void (mp::Daemon::*)(const mp::SnapshotRequest*,
+                         grpc::ServerReaderWriterInterface<mp::SnapshotReply, mp::SnapshotRequest>*,
+                         std::promise<grpc::Status>*),
+    const mp::SnapshotRequest&,
+    testing::StrictMock<mpt::MockServerReaderWriter<mp::SnapshotReply, mp::SnapshotRequest>>&&);
+template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
+    mp::Daemon&,
+    void (mp::Daemon::*)(const mp::RestoreRequest*,
+                         grpc::ServerReaderWriterInterface<mp::RestoreReply, mp::RestoreRequest>*,
+                         std::promise<grpc::Status>*),
+    const mp::RestoreRequest&,
+    testing::StrictMock<mpt::MockServerReaderWriter<mp::RestoreReply, mp::RestoreRequest>>&);
+template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
+    mp::Daemon&,
+    void (mp::Daemon::*)(const mp::RestoreRequest*,
+                         grpc::ServerReaderWriterInterface<mp::RestoreReply, mp::RestoreRequest>*,
+                         std::promise<grpc::Status>*),
+    const mp::RestoreRequest&,
+    StrictMock<mpt::MockServerReaderWriter<mp::RestoreReply, mp::RestoreRequest>>&&);
+template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
+    mp::Daemon&,
+    void (mp::Daemon::*)(const mp::CloneRequest*,
+                         grpc::ServerReaderWriterInterface<mp::CloneReply, mp::CloneRequest>*,
+                         std::promise<grpc::Status>*),
+    const mp::CloneRequest&,
+    NiceMock<mpt::MockServerReaderWriter<mp::CloneReply, mp::CloneRequest>>&);
+template grpc::Status mpt::DaemonTestFixture::call_daemon_slot(
+    mp::Daemon&,
+    void (mp::Daemon::*)(const mp::CloneRequest*,
+                         grpc::ServerReaderWriterInterface<mp::CloneReply, mp::CloneRequest>*,
+                         std::promise<grpc::Status>*),
+    const mp::CloneRequest&,
+    NiceMock<mpt::MockServerReaderWriter<mp::CloneReply, mp::CloneRequest>>&&);

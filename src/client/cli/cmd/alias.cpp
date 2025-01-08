@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -116,7 +116,7 @@ mp::ParseCode cmd::Alias::parse_args(mp::ArgParser* parser)
     auto instance = definition.left(colon_pos).toStdString();
     auto working_directory = parser->isSet(no_alias_dir_mapping_option) ? "default" : "map";
 
-    info_request.mutable_instance_names()->add_instance_name(instance);
+    info_request.add_instance_snapshot_pairs()->set_instance_name(instance);
     info_request.set_verbosity_level(0);
     info_request.set_no_runtime_information(true);
 
@@ -141,9 +141,9 @@ mp::ParseCode cmd::Alias::parse_args(mp::ArgParser* parser)
         return ParseCode::CommandLineError;
     }
 
-    if (aliases.get_alias(alias_name))
+    if (aliases.get_alias_from_current_context(alias_name))
     {
-        cerr << fmt::format("Alias '{}' already exists\n", alias_name);
+        cerr << fmt::format("Alias '{}' already exists in current context\n", alias_name);
         return ParseCode::CommandLineError;
     }
 
