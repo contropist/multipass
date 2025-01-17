@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,12 +19,15 @@
 #define MULTIPASS_TERMINAL_H
 
 #include <istream>
+#include <libssh/libssh.h>
 #include <memory>
 #include <ostream>
 #include <string>
 
 namespace multipass
 {
+class Console;
+
 class Terminal
 {
 public:
@@ -44,6 +47,9 @@ public:
 
     using UPtr = std::unique_ptr<Terminal>;
     static UPtr make_terminal();
+
+    using ConsolePtr = std::unique_ptr<Console>;
+    virtual ConsolePtr make_console(ssh_channel channel) = 0;
 };
 } // namespace multipass
 

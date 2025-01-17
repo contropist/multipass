@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -132,18 +132,6 @@ TEST_F(TestSimpleStreamsManifest, can_query_all_versions)
         const auto info = manifest->image_records[hash];
         EXPECT_THAT(info, NotNull());
     }
-}
-
-TEST_F(TestSimpleStreamsManifest, info_has_kernel_and_initrd_paths)
-{
-    auto json = mpt::load_test_file("good_manifest.json");
-    auto manifest = mp::SimpleStreamsManifest::fromJson(json, std::nullopt, "");
-
-    const auto info = manifest->image_records["default"];
-    ASSERT_THAT(info, NotNull());
-
-    EXPECT_FALSE(info->kernel_location.isEmpty());
-    EXPECT_FALSE(info->initrd_location.isEmpty());
 }
 
 TEST_F(TestSimpleStreamsManifest, LXDDriverReturnsExpectedData)

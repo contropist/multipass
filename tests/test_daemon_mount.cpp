@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@
 
 #include "common.h"
 #include "daemon_test_fixture.h"
+#include "mock_file_ops.h"
 #include "mock_logger.h"
 #include "mock_mount_handler.h"
 #include "mock_platform.h"
@@ -24,6 +25,7 @@
 #include "mock_settings.h"
 #include "mock_virtual_machine.h"
 #include "mock_vm_image_vault.h"
+#include "stub_mount_handler.h"
 #include "temp_dir.h"
 #include "temp_file.h"
 
@@ -46,7 +48,6 @@ struct TestDaemonMount : public mpt::DaemonTestFixture
         EXPECT_CALL(mock_settings, unregister_handler).Times(AnyNumber());
         EXPECT_CALL(mock_settings, get(Eq(mp::mounts_key))).WillRepeatedly(Return("true"));
 
-        config_builder.mount_handlers.clear();
         config_builder.vault = std::make_unique<NiceMock<mpt::MockVMImageVault>>();
 
         mock_factory = use_a_mock_vm_factory();
@@ -85,37 +86,6 @@ TEST_F(TestDaemonMount, refusesDisabledMount)
     EXPECT_THAT(status.error_message(), HasSubstr("Mounts are disabled on this installation of Multipass."));
 }
 
-TEST_F(TestDaemonMount, missingSourceDirFails)
-{
-    const std::string missing_dir{"/missing/dir"};
-    mp::Daemon daemon{config_builder.build()};
-
-    mp::MountRequest request;
-    request.set_source_path(missing_dir);
-
-    auto status = call_daemon_slot(daemon, &mp::Daemon::mount, request,
-                                   StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
-
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("source \"{}\" does not exist", missing_dir)));
-}
-
-TEST_F(TestDaemonMount, sourceNotDirFails)
-{
-    mpt::TempFile file;
-
-    mp::Daemon daemon{config_builder.build()};
-
-    mp::MountRequest request;
-    request.set_source_path(file.name().toStdString());
-
-    auto status = call_daemon_slot(daemon, &mp::Daemon::mount, request,
-                                   StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
-
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("source \"{}\" is not a directory", file.name())));
-}
-
 TEST_F(TestDaemonMount, missingInstanceFails)
 {
     const std::string& fake_instance{"fake"};
@@ -131,25 +101,20 @@ TEST_F(TestDaemonMount, missingInstanceFails)
                                    StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("instance \"{}\" does not exist", fake_instance)));
+    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("instance '{}' does not exist", fake_instance)));
 }
 
 TEST_F(TestDaemonMount, invalidTargetPathFails)
 {
-    const std::string invalid_path{"/dev/foo"};
-    const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
+    const auto [temp_dir, _] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
     config_builder.data_directory = temp_dir->path();
 
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
-
-    EXPECT_CALL(*mock_mount_handler, stop_all_mounts_for_instance(_)).Times(1);
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
+    EXPECT_CALL(*mock_factory, create_virtual_machine)
+        .WillOnce(Return(std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name)));
 
     mp::Daemon daemon{config_builder.build()};
 
+    const std::string invalid_path{"/dev/foo"};
     mp::MountRequest request;
     request.set_source_path(mount_dir.path().toStdString());
     auto entry = request.add_target_paths();
@@ -160,67 +125,36 @@ TEST_F(TestDaemonMount, invalidTargetPathFails)
                                    StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("Unable to mount to \"{}\"", invalid_path)));
+    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("unable to mount to \"{}\"", invalid_path)));
 }
 
 TEST_F(TestDaemonMount, mountIgnoresTrailingSlash)
 {
-    const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
+    const auto [temp_dir, _] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
     config_builder.data_directory = temp_dir->path();
 
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
-
-    EXPECT_CALL(*mock_mount_handler, has_instance_already_mounted(_, _)).WillRepeatedly([this](auto, auto path) {
-        return fake_target_path == path;
-    });
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
+    auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
+    EXPECT_CALL(*mock_vm, make_native_mount_handler).WillOnce(Return(std::make_unique<mpt::StubMountHandler>()));
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
 
     mp::Daemon daemon{config_builder.build()};
 
     mp::MountRequest request;
     request.set_source_path(mount_dir.path().toStdString());
-    auto entry = request.add_target_paths();
-    entry->set_instance_name(mock_instance_name);
-    entry->set_target_path(fake_target_path + "/");
+    request.set_mount_type(mp::MountRequest::NATIVE);
+    auto entry1 = request.add_target_paths();
+    entry1->set_instance_name(mock_instance_name);
+    entry1->set_target_path(fake_target_path);
+    auto entry2 = request.add_target_paths();
+    entry2->set_instance_name(mock_instance_name);
+    entry2->set_target_path(fake_target_path + "/");
 
     auto status = call_daemon_slot(daemon, &mp::Daemon::mount, request,
                                    StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
     EXPECT_THAT(status.error_message(),
-                HasSubstr(fmt::format("\"{}:{}\" is already mounted", mock_instance_name, fake_target_path)));
-}
-
-TEST_F(TestDaemonMount, mountExistsDoesNotTryMount)
-{
-    const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
-    config_builder.data_directory = temp_dir->path();
-
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
-
-    EXPECT_CALL(*mock_mount_handler, has_instance_already_mounted(_, _)).WillOnce(Return(true));
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
-
-    mp::Daemon daemon{config_builder.build()};
-
-    mp::MountRequest request;
-    request.set_source_path(mount_dir.path().toStdString());
-    auto entry = request.add_target_paths();
-    entry->set_instance_name(mock_instance_name);
-    entry->set_target_path(fake_target_path);
-
-    auto status = call_daemon_slot(daemon, &mp::Daemon::mount, request,
-                                   StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
-
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-    EXPECT_THAT(status.error_message(),
-                HasSubstr(fmt::format("\"{}:{}\" is already mounted", mock_instance_name, fake_target_path)));
+                HasSubstr(fmt::format("\"{}\" is already mounted in '{}'", fake_target_path, mock_instance_name)));
 }
 
 TEST_F(TestDaemonMount, skipStartMountIfInstanceIsNotRunning)
@@ -228,62 +162,19 @@ TEST_F(TestDaemonMount, skipStartMountIfInstanceIsNotRunning)
     const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
     config_builder.data_directory = temp_dir->path();
 
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
+    EXPECT_CALL(*mock_mount_handler, activate_impl).Times(0);
 
-    EXPECT_CALL(*instance_ptr, current_state()).WillRepeatedly(Return(mp::VirtualMachine::State::stopped));
+    auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
+    EXPECT_CALL(*mock_vm, current_state).WillRepeatedly(Return(mp::VirtualMachine::State::stopped));
+    EXPECT_CALL(*mock_vm, make_native_mount_handler).WillOnce(Return(std::move(mock_mount_handler)));
 
-    EXPECT_CALL(*mock_mount_handler, has_instance_already_mounted(_, _)).WillOnce(Return(false));
-    EXPECT_CALL(*mock_mount_handler, init_mount(_, _, _)).Times(1);
-    EXPECT_CALL(*mock_mount_handler, start_mount(_, _, _, _)).Times(0);
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
 
     mp::Daemon daemon{config_builder.build()};
 
     mp::MountRequest request;
     request.set_source_path(mount_dir.path().toStdString());
-    auto entry = request.add_target_paths();
-    entry->set_instance_name(mock_instance_name);
-    entry->set_target_path(fake_target_path);
-
-    auto status = call_daemon_slot(daemon, &mp::Daemon::mount, request,
-                                   StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
-
-    EXPECT_TRUE(status.ok());
-}
-
-TEST_F(TestDaemonMount, mountAlreadyDefinedLogsAndContinues)
-{
-    std::unordered_map<std::string, mp::VMMount> mounts;
-    mounts.emplace(fake_target_path,
-                   mp::VMMount{mount_dir.path().toStdString(), {}, {}, mp::VMMount::MountType::Classic});
-
-    const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces, mounts));
-    config_builder.data_directory = temp_dir->path();
-
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
-
-    EXPECT_CALL(*instance_ptr, current_state()).WillRepeatedly(Return(mp::VirtualMachine::State::stopped));
-
-    EXPECT_CALL(*mock_mount_handler, has_instance_already_mounted(_, _)).WillOnce(Return(false));
-    EXPECT_CALL(*mock_mount_handler, init_mount(_, _, _)).Times(1);
-    EXPECT_CALL(*mock_mount_handler, start_mount(_, _, _, _)).Times(0);
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
-
-    mp::Daemon daemon{config_builder.build()};
-
-    auto logger_scope = mpt::MockLogger::inject();
-    logger_scope.mock_logger->screen_logs(mpl::Level::info);
-    logger_scope.mock_logger->expect_log(
-        mpl::Level::info, fmt::format("Mount already defined for \"{}:{}\"", mock_instance_name, fake_target_path));
-
-    mp::MountRequest request;
-    request.set_source_path(mount_dir.path().toStdString());
+    request.set_mount_type(mp::MountRequest::NATIVE);
     auto entry = request.add_target_paths();
     entry->set_instance_name(mock_instance_name);
     entry->set_target_path(fake_target_path);
@@ -299,22 +190,19 @@ TEST_F(TestDaemonMount, startsMountIfInstanceRunning)
     const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
     config_builder.data_directory = temp_dir->path();
 
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
+    EXPECT_CALL(*mock_mount_handler, activate_impl).Times(1);
 
-    EXPECT_CALL(*instance_ptr, current_state()).WillRepeatedly(Return(mp::VirtualMachine::State::running));
+    auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
+    EXPECT_CALL(*mock_vm, current_state).WillRepeatedly(Return(mp::VirtualMachine::State::running));
+    EXPECT_CALL(*mock_vm, make_native_mount_handler).WillOnce(Return(std::move(mock_mount_handler)));
 
-    EXPECT_CALL(*mock_mount_handler, has_instance_already_mounted(_, _)).WillOnce(Return(false));
-    EXPECT_CALL(*mock_mount_handler, init_mount(_, _, _)).Times(1);
-    EXPECT_CALL(*mock_mount_handler, start_mount(_, _, _, _)).Times(1);
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
 
     mp::Daemon daemon{config_builder.build()};
 
     mp::MountRequest request;
     request.set_source_path(mount_dir.path().toStdString());
+    request.set_mount_type(mp::MountRequest::NATIVE);
     auto entry = request.add_target_paths();
     entry->set_instance_name(mock_instance_name);
     entry->set_target_path(fake_target_path);
@@ -325,61 +213,25 @@ TEST_F(TestDaemonMount, startsMountIfInstanceRunning)
     EXPECT_TRUE(status.ok());
 }
 
-TEST_F(TestDaemonMount, mountFailsSshfsMissing)
-{
-    const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
-    config_builder.data_directory = temp_dir->path();
-
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
-
-    EXPECT_CALL(*instance_ptr, current_state()).WillRepeatedly(Return(mp::VirtualMachine::State::running));
-
-    EXPECT_CALL(*mock_mount_handler, has_instance_already_mounted(_, _)).WillOnce(Return(false));
-    EXPECT_CALL(*mock_mount_handler, init_mount(_, _, _)).Times(1);
-    EXPECT_CALL(*mock_mount_handler, start_mount(_, _, _, _)).WillOnce(Throw(mp::SSHFSMissingError{}));
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
-
-    mp::Daemon daemon{config_builder.build()};
-
-    mp::MountRequest request;
-    request.set_source_path(mount_dir.path().toStdString());
-    auto entry = request.add_target_paths();
-    entry->set_instance_name(mock_instance_name);
-    entry->set_target_path(fake_target_path);
-
-    auto status = call_daemon_slot(daemon, &mp::Daemon::mount, request,
-                                   StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
-
-    EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
-    EXPECT_THAT(status.error_message(),
-                HasSubstr(fmt::format("Error enabling mount support in '{}'", mock_instance_name)));
-}
-
 TEST_F(TestDaemonMount, mountFailsErrorMounting)
 {
-    const std::string error_msg{fmt::format("Cannot mount {}", mount_dir.path().toStdString())};
     const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
     config_builder.data_directory = temp_dir->path();
 
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
+    auto error = "permission denied";
+    EXPECT_CALL(*mock_mount_handler, activate_impl).WillOnce(Throw(std::runtime_error(error)));
 
-    EXPECT_CALL(*instance_ptr, current_state()).WillRepeatedly(Return(mp::VirtualMachine::State::running));
+    auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
+    EXPECT_CALL(*mock_vm, current_state).WillRepeatedly(Return(mp::VirtualMachine::State::running));
+    EXPECT_CALL(*mock_vm, make_native_mount_handler).WillOnce(Return(std::move(mock_mount_handler)));
 
-    EXPECT_CALL(*mock_mount_handler, has_instance_already_mounted(_, _)).WillOnce(Return(false));
-    EXPECT_CALL(*mock_mount_handler, init_mount(_, _, _)).Times(1);
-    EXPECT_CALL(*mock_mount_handler, start_mount(_, _, _, _)).WillOnce(Throw(std::runtime_error(error_msg)));
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
 
     mp::Daemon daemon{config_builder.build()};
 
     mp::MountRequest request;
     request.set_source_path(mount_dir.path().toStdString());
+    request.set_mount_type(mp::MountRequest::NATIVE);
     auto entry = request.add_target_paths();
     entry->set_instance_name(mock_instance_name);
     entry->set_target_path(fake_target_path);
@@ -388,50 +240,7 @@ TEST_F(TestDaemonMount, mountFailsErrorMounting)
                                    StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
-    EXPECT_THAT(status.error_message(),
-                HasSubstr(fmt::format("error mounting \"{}\": {}", fake_target_path, error_msg)));
-}
-
-TEST_F(TestDaemonMount, expectedUidsGidsPassedToInitMount)
-{
-    const auto host_uid{1000}, instance_uid{1001}, host_gid{1002}, instance_gid{1003};
-    const mp::VMMount mount{mount_dir.path().toStdString(), mp::id_mappings{{host_gid, instance_gid}},
-                            mp::id_mappings{{host_uid, instance_uid}}, mp::VMMount::MountType::Classic};
-
-    const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
-    config_builder.data_directory = temp_dir->path();
-
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
-
-    EXPECT_CALL(*instance_ptr, current_state()).WillRepeatedly(Return(mp::VirtualMachine::State::stopped));
-
-    EXPECT_CALL(*mock_mount_handler, has_instance_already_mounted(_, _)).WillOnce(Return(false));
-    EXPECT_CALL(*mock_mount_handler, init_mount(_, _, mount)).Times(1);
-    config_builder.mount_handlers[mp::VMMount::MountType::Classic] = std::move(mock_mount_handler);
-
-    mp::Daemon daemon{config_builder.build()};
-
-    mp::MountRequest request;
-    request.set_source_path(mount_dir.path().toStdString());
-    auto entry = request.add_target_paths();
-    entry->set_instance_name(mock_instance_name);
-    entry->set_target_path(fake_target_path);
-
-    auto mount_maps = request.mutable_mount_maps();
-    auto uid_pair = mount_maps->add_uid_mappings();
-    uid_pair->set_host_id(host_uid);
-    uid_pair->set_instance_id(instance_uid);
-    auto gid_pair = mount_maps->add_gid_mappings();
-    gid_pair->set_host_id(host_gid);
-    gid_pair->set_instance_id(instance_gid);
-
-    auto status = call_daemon_slot(daemon, &mp::Daemon::mount, request,
-                                   StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
-
-    EXPECT_TRUE(status.ok());
+    EXPECT_THAT(status.error_message(), HasSubstr(fmt::format("error mounting \"{}\": {}", fake_target_path, error)));
 }
 
 TEST_F(TestDaemonMount, performanceMountsNotImplementedHasErrorFails)
@@ -439,19 +248,16 @@ TEST_F(TestDaemonMount, performanceMountsNotImplementedHasErrorFails)
     const auto [temp_dir, filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
     config_builder.data_directory = temp_dir->path();
 
-    auto instance_ptr = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
-    EXPECT_CALL(*mock_factory, create_virtual_machine(_, _)).WillOnce([&instance_ptr](const auto&, auto&) {
-        return std::move(instance_ptr);
-    });
-
-    EXPECT_CALL(*mock_factory, create_performance_mount_handler(_))
-        .WillOnce(Throw(mp::NotImplementedOnThisBackendException("foo")));
+    auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
+    EXPECT_CALL(*mock_vm, make_native_mount_handler)
+        .WillOnce(Throw(mp::NotImplementedOnThisBackendException("native mounts")));
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
 
     mp::Daemon daemon{config_builder.build()};
 
     mp::MountRequest request;
     request.set_source_path(mount_dir.path().toStdString());
-    request.set_mount_type(mp::MountRequest_MountType_NATIVE);
+    request.set_mount_type(mp::MountRequest::NATIVE);
     auto entry = request.add_target_paths();
     entry->set_instance_name(mock_instance_name);
     entry->set_target_path(fake_target_path);
@@ -461,4 +267,52 @@ TEST_F(TestDaemonMount, performanceMountsNotImplementedHasErrorFails)
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::FAILED_PRECONDITION);
     EXPECT_THAT(status.error_message(), StrEq("The native mounts feature is not implemented on this backend."));
+}
+
+TEST_F(TestDaemonMount, mount_uses_resolved_source)
+{
+    // can't use _ since _ is needed for gmock matching later.
+    const auto [temp_dir, ignored_filename] = plant_instance_json(fake_json_contents(mac_addr, extra_interfaces));
+    config_builder.data_directory = temp_dir->path();
+
+    const auto target_path = config_builder.data_directory.toStdString();
+
+    // have resolver return target_path
+    const auto [mock_file_ops, file_ops_guard] = mpt::MockFileOps::inject<NiceMock>();
+    EXPECT_CALL(*mock_file_ops, weakly_canonical).WillOnce(Return(target_path));
+
+    // mock mount_handler to check the VMMount is using target_path as its source
+    auto mock_vm = std::make_unique<NiceMock<mpt::MockVirtualMachine>>(mock_instance_name);
+    EXPECT_CALL(*mock_vm,
+                make_native_mount_handler(
+                    _,
+                    Matcher<const mp::VMMount&>(Property(&mp::VMMount::get_source_path, Eq(target_path)))))
+        .WillOnce(Return(std::move(mock_mount_handler)));
+
+    EXPECT_CALL(*mock_factory, create_virtual_machine).WillOnce(Return(std::move(mock_vm)));
+
+    // setup to make the daemon happy
+    MP_DELEGATE_MOCK_CALLS_ON_BASE(*mock_file_ops, mkpath, FileOps);
+    MP_DELEGATE_MOCK_CALLS_ON_BASE(*mock_file_ops, commit, FileOps);
+    MP_DELEGATE_MOCK_CALLS_ON_BASE_WITH_MATCHERS(*mock_file_ops,
+                                                 open,
+                                                 FileOps,
+                                                 (A<QFileDevice&>(), A<QIODevice::OpenMode>()));
+
+    mp::Daemon daemon{config_builder.build()};
+
+    mp::MountRequest request;
+    request.set_source_path(mount_dir.path().toStdString());
+    request.set_mount_type(mp::MountRequest::NATIVE);
+    auto entry = request.add_target_paths();
+    entry->set_instance_name(mock_instance_name);
+    entry->set_target_path(fake_target_path);
+
+    // invoke daemon and expect it to be happy
+    auto status = call_daemon_slot(daemon,
+                                   &mp::Daemon::mount,
+                                   request,
+                                   StrictMock<mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest>>{});
+
+    EXPECT_TRUE(status.ok());
 }

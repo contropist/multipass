@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -45,7 +45,7 @@ mp::id_mappings convert_id_mappings(const char* in)
     mp::id_mappings ret_map;
     QString input(in);
 
-    auto maps = input.split(',', QString::SkipEmptyParts);
+    auto maps = input.split(',', Qt::SkipEmptyParts);
     for (auto map : maps)
     {
         auto ids = map.split(":");
@@ -108,7 +108,7 @@ int main(int argc, char* argv[])
         auto watchdog = mpp::make_quit_watchdog(); // called while there is only one thread
 
         mp::SSHSession session{host, port, username, mp::SSHClientKeyProvider{priv_key_blob}};
-        mp::SshfsMount sshfs_mount(move(session), source_path, target_path, gid_mappings, uid_mappings);
+        mp::SshfsMount sshfs_mount(std::move(session), source_path, target_path, gid_mappings, uid_mappings);
 
         // ssh lives on its own thread, use this thread to listen for quit signal
         if (int sig = watchdog())

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -25,12 +25,11 @@
 
 namespace mp = multipass;
 namespace mpl = multipass::logging;
-namespace mu = multipass::utils;
+namespace mpu = multipass::utils;
 
-mp::QemuVMProcessSpec::QemuVMProcessSpec(
-    const mp::VirtualMachineDescription& desc, const QStringList& platform_args,
-    const std::unordered_map<std::string, std::pair<std::string, QStringList>>& mount_args,
-    const std::optional<ResumeData>& resume_data)
+mp::QemuVMProcessSpec::QemuVMProcessSpec(const mp::VirtualMachineDescription& desc, const QStringList& platform_args,
+                                         const mp::QemuVirtualMachine::MountArgs& mount_args,
+                                         const std::optional<ResumeData>& resume_data)
     : desc{desc}, platform_args{platform_args}, mount_args{mount_args}, resume_data{resume_data}
 {
 }
@@ -90,9 +89,12 @@ QStringList mp::QemuVMProcessSpec::arguments() const
              << "-nographic";
         // Cloud-init disk
         args << "-cdrom" << desc.cloud_init_iso;
+    }
 
-        for (auto& it : mount_args)
-            args << it.second.second;
+    for (const auto& [_, mount_data] : mount_args)
+    {
+        const auto& [__, mount_args] = mount_data;
+        args << mount_args;
     }
 
     return args;
@@ -120,6 +122,10 @@ profile %1 flags=(attach_disconnected) {
   # needed to drop privileges
   capability setgid,
   capability setuid,
+
+  # for bridge helper
+  capability net_admin,
+  capability net_raw,
 
   network inet stream,
   network inet6 stream,
@@ -150,6 +156,9 @@ profile %1 flags=(attach_disconnected) {
   /{usr/,}bin/dash rmix,
   /{usr/,}bin/dd rmix,
   /{usr/,}bin/cat rmix,
+
+  # to execute bridge helper
+  %4/bin/bridge_helper ix,
 
   # for restore
   /{usr/,}bin/bash rmix,
@@ -185,22 +194,23 @@ profile %1 flags=(attach_disconnected) {
     QString firmware;    // location of bootloader firmware needed by qemu
     QString mount_dirs;  // directories on host that are mounted
 
-    for (auto& it : mount_args)
+    for (const auto& [_, mount_data] : mount_args)
     {
-        mount_dirs += QString::fromStdString(it.second.first) + "/ rw,\n  ";
-        mount_dirs += QString::fromStdString(it.second.first) + "/** rwlk,\n  ";
+        const auto& [source_path, __] = mount_data;
+        mount_dirs += QString::fromStdString(source_path) + "/ rw,\n  ";
+        mount_dirs += QString::fromStdString(source_path) + "/** rwlk,\n  ";
     }
 
     try
     {
-        root_dir = mu::snap_dir();
+        root_dir = mpu::snap_dir();
         signal_peer = "snap.multipass.multipassd"; // only multipassd can send qemu signals
         firmware = root_dir + "/qemu/*";           // if snap confined, firmware in $SNAP/qemu
     }
     catch (const mp::SnapEnvironmentException&)
     {
         signal_peer = "unconfined";
-        firmware = "/usr/share/{seabios,ovmf,qemu-efi}/*";
+        firmware = "/usr{,/local}/share/{seabios,ovmf,qemu,qemu-efi}/*";
     }
 
     return profile_template.arg(apparmor_profile_name(), signal_peer, firmware, root_dir, program(),

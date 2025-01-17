@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -45,20 +45,19 @@ public:
     virtual std::optional<IPAddress> get_ip_for(const std::string& hw_addr) = 0;
     virtual void remove_resources_for(const std::string&) = 0;
     virtual void platform_health_check() = 0;
-    virtual void release_mac_with_different_hostname(const std::string& hw_addr, const std::string& name){};
     virtual QStringList vmstate_platform_args()
     {
         return {};
     };
     virtual QStringList vm_platform_args(const VirtualMachineDescription& vm_desc) = 0;
-    virtual QString get_directory_name()
+    virtual QString get_directory_name() const
     {
         return {};
     };
-    virtual std::vector<NetworkInterfaceInfo> networks() const
-    {
-        throw NotImplementedOnThisBackendException("networks");
-    };
+    virtual bool is_network_supported(const std::string& network_type) const = 0;
+    virtual bool needs_network_prep() const = 0;
+    virtual std::string create_bridge_with(const NetworkInterfaceInfo& interface) const = 0;
+    virtual void set_authorization(std::vector<NetworkInterfaceInfo>& networks) = 0;
 
 protected:
     explicit QemuPlatform() = default;

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,7 +18,9 @@
 #ifndef MULTIPASS_SFTP_SERVER_H
 #define MULTIPASS_SFTP_SERVER_H
 
+#include <multipass/file_ops.h>
 #include <multipass/id_mappings.h>
+#include <multipass/recursive_dir_iterator.h>
 #include <multipass/ssh/ssh_session.h>
 
 #include <libssh/sftp.h>
@@ -55,8 +57,13 @@ private:
     sftp_attributes_struct attr_from(const QFileInfo& file_info);
     int mapped_uid_for(const int uid);
     int mapped_gid_for(const int gid);
-    int reverse_uid_for(const int uid, const int rev_uid_if_not_found);
-    int reverse_gid_for(const int gid, const int rev_gid_if_not_found);
+    int reverse_uid_for(const int uid, const int default_id);
+    int reverse_gid_for(const int gid, const int default_id);
+    bool has_uid_mapping_for(const int uid);
+    bool has_gid_mapping_for(const int gid);
+    bool has_reverse_uid_mapping_for(const int uid);
+    bool has_reverse_gid_mapping_for(const int gid);
+    bool has_id_mappings_for(const QFileInfo& file_info);
 
     int handle_close(sftp_client_message msg);
     int handle_fstat(sftp_client_message msg);
@@ -76,13 +83,16 @@ private:
     int handle_write(sftp_client_message msg);
     int handle_extended(sftp_client_message msg);
 
+    template <typename T>
+    T* get_handle(sftp_client_message msg);
+
     SSHSession ssh_session;
     SSHFSProcUptr sshfs_process;
     SftpSessionUptr sftp_server_session;
     const std::string source_path;
     const std::string target_path;
-    std::unordered_map<void*, std::unique_ptr<QFileInfoList>> open_dir_handles;
-    std::unordered_map<void*, std::unique_ptr<QFile>> open_file_handles;
+    std::unordered_map<void*, std::unique_ptr<NamedFd>> open_file_handles;
+    std::unordered_map<void*, std::unique_ptr<DirIterator>> open_dir_handles;
     const id_mappings gid_mappings;
     const id_mappings uid_mappings;
     const int default_uid;

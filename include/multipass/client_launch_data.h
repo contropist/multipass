@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,7 +27,7 @@ namespace multipass
 {
 struct ClientLaunchData
 {
-    AliasMap aliases_to_be_created;
+    AliasContext aliases_to_be_created;
     std::vector<std::string> workspaces_to_be_created;
 };
 } // namespace multipass

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -63,6 +63,11 @@ int mp::platform::Platform::chmod(const char* path, unsigned int mode) const
     return ::chmod(path, mode);
 }
 
+bool mp::platform::Platform::set_permissions(const mp::Path path, const QFileDevice::Permissions permissions) const
+{
+    return QFile::setPermissions(path, permissions);
+}
+
 bool mp::platform::Platform::symlink(const char* target, const char* link, bool is_dir) const
 {
     return ::symlink(target, link) == 0;
@@ -77,6 +82,11 @@ int mp::platform::Platform::utime(const char* path, int atime, int mtime) const
     tv[1].tv_usec = 0;
 
     return ::lutimes(path, tv);
+}
+
+QString mp::platform::Platform::get_username() const
+{
+    return {};
 }
 
 std::string mp::platform::Platform::alias_path_message() const
@@ -172,4 +182,14 @@ std::function<int()> mp::platform::make_quit_watchdog()
         sigwait(&sigset, &sig);
         return sig;
     };
+}
+
+int mp::platform::Platform::get_cpus() const
+{
+    return sysconf(_SC_NPROCESSORS_ONLN);
+}
+
+long long mp::platform::Platform::get_total_ram() const
+{
+    return static_cast<long long>(sysconf(_SC_PHYS_PAGES)) * sysconf(_SC_PAGESIZE);
 }

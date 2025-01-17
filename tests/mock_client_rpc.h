@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -188,6 +188,54 @@ public:
                 (override));
     MOCK_METHOD((grpc::ClientAsyncReaderWriterInterface<multipass::AuthenticateRequest, multipass::AuthenticateReply>*),
                 PrepareAsyncauthenticateRaw, (grpc::ClientContext * context, grpc::CompletionQueue* cq), (override));
+    MOCK_METHOD((grpc::ClientReaderWriterInterface<multipass::SnapshotRequest, multipass::SnapshotReply>*),
+                snapshotRaw,
+                (grpc::ClientContext * context),
+                (override));
+    MOCK_METHOD((grpc::ClientAsyncReaderWriterInterface<multipass::SnapshotRequest, multipass::SnapshotReply>*),
+                AsyncsnapshotRaw,
+                (grpc::ClientContext * context, grpc::CompletionQueue* cq, void* tag),
+                (override));
+    MOCK_METHOD((grpc::ClientAsyncReaderWriterInterface<multipass::SnapshotRequest, multipass::SnapshotReply>*),
+                PrepareAsyncsnapshotRaw,
+                (grpc::ClientContext * context, grpc::CompletionQueue* cq),
+                (override));
+    MOCK_METHOD((grpc::ClientReaderWriterInterface<multipass::RestoreRequest, multipass::RestoreReply>*),
+                restoreRaw,
+                (grpc::ClientContext * context),
+                (override));
+    MOCK_METHOD((grpc::ClientAsyncReaderWriterInterface<multipass::RestoreRequest, multipass::RestoreReply>*),
+                AsyncrestoreRaw,
+                (grpc::ClientContext * context, grpc::CompletionQueue* cq, void* tag),
+                (override));
+    MOCK_METHOD((grpc::ClientAsyncReaderWriterInterface<multipass::RestoreRequest, multipass::RestoreReply>*),
+                PrepareAsyncrestoreRaw,
+                (grpc::ClientContext * context, grpc::CompletionQueue* cq),
+                (override));
+    MOCK_METHOD((grpc::ClientReaderWriterInterface<multipass::CloneRequest, multipass::CloneReply>*),
+                cloneRaw,
+                (grpc::ClientContext * context),
+                (override));
+    MOCK_METHOD((grpc::ClientAsyncReaderWriterInterface<multipass::CloneRequest, multipass::CloneReply>*),
+                AsynccloneRaw,
+                (grpc::ClientContext * context, grpc::CompletionQueue* cq, void* tag),
+                (override));
+    MOCK_METHOD((grpc::ClientAsyncReaderWriterInterface<multipass::CloneRequest, multipass::CloneReply>*),
+                PrepareAsynccloneRaw,
+                (grpc::ClientContext * context, grpc::CompletionQueue* cq),
+                (override));
+    MOCK_METHOD((grpc::ClientReaderWriterInterface<multipass::DaemonInfoRequest, multipass::DaemonInfoReply>*),
+                daemon_infoRaw,
+                (grpc::ClientContext * context),
+                (override));
+    MOCK_METHOD((grpc::ClientAsyncReaderWriterInterface<multipass::DaemonInfoRequest, multipass::DaemonInfoReply>*),
+                Asyncdaemon_infoRaw,
+                (grpc::ClientContext * context, grpc::CompletionQueue* cq, void* tag),
+                (override));
+    MOCK_METHOD((grpc::ClientAsyncReaderWriterInterface<multipass::DaemonInfoRequest, multipass::DaemonInfoReply>*),
+                PrepareAsyncdaemon_infoRaw,
+                (grpc::ClientContext * context, grpc::CompletionQueue* cq),
+                (override));
 };
 } // namespace multipass::test
 

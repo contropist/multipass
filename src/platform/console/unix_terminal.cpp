@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,6 +21,8 @@
 
 #include <termios.h>
 #include <unistd.h>
+
+#include "unix_console.h"
 
 namespace mp = multipass;
 
@@ -55,4 +57,9 @@ void mp::UnixTerminal::set_cin_echo(const bool enable)
         tty.c_lflag |= ECHO;
 
     tcsetattr(cin_fd(), TCSANOW, &tty);
+}
+
+mp::UnixTerminal::ConsolePtr mp::UnixTerminal::make_console(ssh_channel channel)
+{
+    return std::make_unique<UnixConsole>(channel, this);
 }

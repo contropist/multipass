@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -43,6 +43,7 @@ public:
     virtual std::vector<VMImageInfo> all_images_for(const std::string& remote_name, const bool allow_unsupported) = 0;
     virtual void for_each_entry_do(const Action& action) = 0;
     virtual std::vector<std::string> supported_remotes() = 0;
+    virtual void update_manifests(const bool is_force_update_from_network) = 0;
 
 protected:
     VMImageHost() = default;

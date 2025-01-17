@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 #include "mock_ssh_process_exit_status.h"
 #include "sftp_server_test_fixture.h"
 #include "signal.h"
+#include "stub_ssh_key_provider.h"
 
 #include <src/sshfs_mount/sshfs_mount.h>
 
@@ -48,7 +49,7 @@ struct SshfsMount : public mp::test::SftpServerTest
 {
     mp::SshfsMount make_sshfsmount(std::optional<std::string> target = std::nullopt)
     {
-        mp::SSHSession session{"a", 42};
+        mp::SSHSession session{"a", 42, "ubuntu", key_provider};
         return {std::move(session), default_source, target.value_or(default_target), default_mappings,
                 default_mappings};
     }
@@ -63,7 +64,7 @@ struct SshfsMount : public mp::test::SftpServerTest
                 if (cmd.find(expected_cmd) != std::string::npos)
                 {
                     invoked = true;
-                    exit_status_mock.return_exit_code(SSH_ERROR);
+                    exit_status_mock.set_exit_status(exit_status_mock.failure_status);
                 }
             }
             return SSH_OK;
@@ -92,7 +93,7 @@ struct SshfsMount : public mp::test::SftpServerTest
                 {
                     *fail_invoked = true;
                 }
-                exit_status_mock.return_exit_code(SSH_ERROR);
+                exit_status_mock.set_exit_status(exit_status_mock.failure_status);
             }
             else if (next_expected_cmd != commands.end())
             {
@@ -181,6 +182,7 @@ struct SshfsMount : public mp::test::SftpServerTest
     mp::id_mappings default_mappings;
     int default_id{1000};
     mpt::MockLogger::Scope logger_scope = mpt::MockLogger::inject();
+    const mpt::StubSSHKeyProvider key_provider;
 
     const std::unordered_map<std::string, std::string> default_cmds{
         {"snap run multipass-sshfs.env", "LD_LIBRARY_PATH=/foo/bar\nSNAP=/baz\n"},
@@ -249,7 +251,7 @@ TEST_P(SshfsMountFail, test_failed_invocation)
     EXPECT_TRUE(*invoked_fail);
 }
 
-TEST_P(SshfsMountExecute, test_succesful_invocation)
+TEST_P(SshfsMountExecute, test_successful_invocation)
 {
     std::string target = GetParam().first;
     CommandVector commands = GetParam().second;
@@ -257,7 +259,7 @@ TEST_P(SshfsMountExecute, test_succesful_invocation)
     test_command_execution(commands, target);
 }
 
-TEST_P(SshfsMountExecuteAndNoFail, test_succesful_invocation_and_fail)
+TEST_P(SshfsMountExecuteAndNoFail, test_successful_invocation_and_fail)
 {
     std::string target = std::get<0>(GetParam());
     CommandVector commands = std::get<1>(GetParam());
@@ -287,13 +289,13 @@ INSTANTIATE_TEST_SUITE_P(SshfsMountThrowWhenError, SshfsMountFail,
 CommandVector old_fuse_cmds = {
     {"sudo env LD_LIBRARY_PATH=/foo/bar /baz/bin/sshfs -V", "FUSE library version: 2.9.0\n"},
     {"sudo env LD_LIBRARY_PATH=/foo/bar /baz/bin/sshfs -o slave -o transform_symlinks -o "
-     "allow_other -o Compression=no -o nonempty -o cache_timeout=3 :\"source\" \"/home/ubuntu/target\"",
+     "allow_other -o Compression=no -o nonempty -o cache=no :\"source\" \"/home/ubuntu/target\"",
      "don't care\n"}};
 
 // Commands to check that a version of FUSE at least 3.0.0 gives a correct answer.
 CommandVector new_fuse_cmds = {{"sudo env LD_LIBRARY_PATH=/foo/bar /baz/bin/sshfs -V", "FUSE library version: 3.0.0\n"},
                                {"sudo env LD_LIBRARY_PATH=/foo/bar /baz/bin/sshfs -o slave -o transform_symlinks -o "
-                                "allow_other -o Compression=no -o dcache_timeout=3 :\"source\" \"/home/ubuntu/target\"",
+                                "allow_other -o Compression=no -o dir_cache=no :\"source\" \"/home/ubuntu/target\"",
                                 "don't care\n"}};
 
 // Commands to check that an unknown version of FUSE gives a correct answer.

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,6 +21,7 @@
 #include "mock_ssh_client.h"
 #include "mock_ssh_test_fixture.h"
 #include "stub_console.h"
+#include "stub_ssh_key_provider.h"
 
 #include <multipass/ssh/ssh_client.h>
 #include <multipass/ssh/ssh_session.h>
@@ -34,9 +35,10 @@ struct SSHClient : public testing::Test
 {
     mp::SSHClient make_ssh_client()
     {
-        return {std::make_unique<mp::SSHSession>("a", 42), console_creator};
+        return {std::make_unique<mp::SSHSession>("a", 42, "ubuntu", key_provider), console_creator};
     }
 
+    const mpt::StubSSHKeyProvider key_provider;
     mpt::MockSSHTestFixture mock_ssh_test_fixture;
     mp::SSHClient::ConsoleCreator console_creator = [](auto /*channel*/) {
         return std::make_unique<mpt::StubConsole>();

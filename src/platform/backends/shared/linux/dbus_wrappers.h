@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -81,6 +81,13 @@ protected:
                                    const QVariant& arg2, const QVariant& arg3)
     {
         assert(iface);
+        if (!arg1.isValid())
+            return iface->call(mode, method);
+        if (!arg2.isValid())
+            return iface->call(mode, method, arg1);
+        if (!arg3.isValid())
+            return iface->call(mode, method, arg1, arg2);
+
         return iface->call(mode, method, arg1, arg2, arg3);
     }
 

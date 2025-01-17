@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -50,7 +50,7 @@ class MockDBusProvider : public mp_dbus::DBusProvider
 {
 public:
     using DBusProvider::DBusProvider;
-    MOCK_CONST_METHOD0(get_system_bus, const mp_dbus::DBusConnection&());
+    MOCK_METHOD(const mp_dbus::DBusConnection&, get_system_bus, (), (const, override));
 
     MP_MOCK_SINGLETON_BOILERPLATE(MockDBusProvider, DBusProvider);
 };
@@ -62,10 +62,10 @@ public:
     {
     }
 
-    MOCK_CONST_METHOD0(is_connected, bool());
-    MOCK_CONST_METHOD0(last_error, QDBusError());
-    MOCK_CONST_METHOD3(get_interface,
-                       std::unique_ptr<mp_dbus::DBusInterface>(const QString&, const QString&, const QString&));
+    MOCK_METHOD(bool, is_connected, (), (const, override));
+    MOCK_METHOD(QDBusError, last_error, (), (const, override));
+    MOCK_METHOD(std::unique_ptr<mp_dbus::DBusInterface>, get_interface,
+                (const QString&, const QString&, const QString&), (const, override));
 };
 
 class MockDBusInterface : public mp_dbus::DBusInterface
@@ -73,13 +73,13 @@ class MockDBusInterface : public mp_dbus::DBusInterface
 public:
     using DBusInterface::DBusInterface;
 
-    MOCK_CONST_METHOD0(is_valid, bool());
-    MOCK_CONST_METHOD0(last_error, QDBusError());
-    MOCK_CONST_METHOD0(interface, QString());
-    MOCK_CONST_METHOD0(path, QString());
-    MOCK_CONST_METHOD0(service, QString());
-    MOCK_METHOD5(call_impl,
-                 QDBusMessage(QDBus::CallMode, const QString&, const QVariant&, const QVariant&, const QVariant&));
+    MOCK_METHOD(bool, is_valid, (), (const, override));
+    MOCK_METHOD(QDBusError, last_error, (), (const, override));
+    MOCK_METHOD(QString, interface, (), (const, override));
+    MOCK_METHOD(QString, path, (), (const, override));
+    MOCK_METHOD(QString, service, (), (const, override));
+    MOCK_METHOD(QDBusMessage, call_impl,
+                (QDBus::CallMode, const QString&, const QVariant&, const QVariant&, const QVariant&), (override));
 };
 
 struct CreateBridgeTest : public Test
@@ -357,7 +357,7 @@ struct CreateBridgeExceptionTest : public CreateBridgeTest, WithParamInterface<b
 TEST_P(CreateBridgeExceptionTest, create_bridge_exception_info)
 {
     auto rollback = GetParam();
-    static constexpr auto specific_info = "spefic error details";
+    static constexpr auto specific_info = "specific error details";
     auto generic_msg = fmt::format("Could not {} bridge", rollback ? "rollback" : "create");
     EXPECT_THAT((mp::backend::CreateBridgeException{specific_info, QDBusError{}, rollback}),
                 mpt::match_what(AllOf(HasSubstr(generic_msg), HasSubstr(specific_info))));
@@ -499,7 +499,7 @@ TEST(LinuxBackendUtils, get_subnet_not_in_file_writes_new_subnet_returns_expecte
 
     EXPECT_CALL(*mock_file_ops, open(_, _)).WillOnce(Return(true));
     EXPECT_CALL(*mock_file_ops, size(_)).WillOnce(Return(0));
-    EXPECT_CALL(*mock_file_ops, write(_, _, _)).WillOnce([&generated_subnet](auto&, auto data, auto) {
+    EXPECT_CALL(*mock_file_ops, write(A<QFile&>(), _, _)).WillOnce([&generated_subnet](auto&, auto data, auto) {
         generated_subnet = std::string(data);
 
         return generated_subnet.length();

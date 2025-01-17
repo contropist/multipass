@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -28,12 +28,13 @@ namespace test
 {
 struct MockTerminal : public Terminal
 {
-    MOCK_METHOD0(cin, std::istream&());
-    MOCK_METHOD0(cout, std::ostream&());
-    MOCK_METHOD0(cerr, std::ostream&());
-    MOCK_CONST_METHOD0(cin_is_live, bool());
-    MOCK_CONST_METHOD0(cout_is_live, bool());
-    MOCK_METHOD1(set_cin_echo, void(const bool));
+    MOCK_METHOD(std::istream&, cin, (), (override));
+    MOCK_METHOD(std::ostream&, cout, (), (override));
+    MOCK_METHOD(std::ostream&, cerr, (), (override));
+    MOCK_METHOD(bool, cin_is_live, (), (const, override));
+    MOCK_METHOD(bool, cout_is_live, (), (const, override));
+    MOCK_METHOD(void, set_cin_echo, (const bool), (override));
+    MOCK_METHOD(ConsolePtr, make_console, (ssh_channel), (override));
 };
 } // namespace test
 } // namespace multipass

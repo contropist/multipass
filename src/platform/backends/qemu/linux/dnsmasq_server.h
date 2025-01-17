@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -41,7 +41,7 @@ public:
     DNSMasqServer(const Path& data_dir, const QString& bridge_name, const std::string& subnet);
     virtual ~DNSMasqServer(); // inherited by mock for testing
 
-    virtual std::optional<std::pair<IPAddress, std::string>> get_ip_and_host_for(const std::string& hw_addr);
+    virtual std::optional<IPAddress> get_ip_for(const std::string& hw_addr);
     virtual void release_mac(const std::string& hw_addr);
     virtual void check_dnsmasq_running();
 

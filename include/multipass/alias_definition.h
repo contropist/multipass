@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -35,7 +35,7 @@ inline bool operator==(const AliasDefinition& a, const AliasDefinition& b)
     return (a.instance == b.instance && a.command == b.command);
 }
 
-typedef typename std::unordered_map<std::string, AliasDefinition> AliasMap;
+typedef typename std::unordered_map<std::string, AliasDefinition> AliasContext;
 
 } // namespace multipass
 #endif // MULTIPASS_ALIAS_DEFINITION_H

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,6 +17,9 @@
 
 #ifndef MULTIPASS_DAEMON_TEST_FIXTURE_H
 #define MULTIPASS_DAEMON_TEST_FIXTURE_H
+
+// This include must go first because it comes from premock.
+#include "mock_ssh_test_fixture.h"
 
 #include "mock_virtual_machine_factory.h"
 #include "temp_dir.h"
@@ -90,6 +93,7 @@ struct DaemonTestFixture : public ::Test
     template <typename DaemonSlotPtr, typename Request, typename Server>
     grpc::Status call_daemon_slot(Daemon& daemon, DaemonSlotPtr slot, const Request& request, Server&& server);
 
+    MockSSHTestFixture mock_ssh_test_fixture;
 #ifdef MULTIPASS_PLATFORM_WINDOWS
     std::string server_address{"localhost:50051"};
 #else

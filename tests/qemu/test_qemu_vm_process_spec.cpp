@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 
 #include <src/platform/backends/qemu/qemu_vm_process_spec.h>
 
+#include <QDir>
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -37,7 +38,7 @@ struct TestQemuVMProcessSpec : public Test
                                              "00:11:22:33:44:55",
                                              {},
                                              "ssh_username",
-                                             {"/path/to/image", "", "", "", "", "", "", {}}, // VMImage
+                                             {"/path/to/image", "", "", "", "", {}}, // VMImage
                                              mp::Path{"/path/to/cloud_init.iso"},
                                              {},
                                              {},
@@ -88,7 +89,8 @@ TEST_F(TestQemuVMProcessSpec, resume_arguments_taken_from_resumedata)
 
     mp::QemuVMProcessSpec spec(desc, platform_args, mount_args, resume_data);
 
-    EXPECT_EQ(spec.arguments(), QStringList({"-one", "-two", "-loadvm", "suspend_tag", "-machine", "machine_type"}));
+    EXPECT_EQ(spec.arguments(), QStringList({"-one", "-two", "-loadvm", "suspend_tag", "-machine", "machine_type"})
+                                    << mount_args.begin()->second.second);
 }
 
 TEST_F(TestQemuVMProcessSpec, resume_with_missing_machine_type_guesses_correctly)
@@ -99,7 +101,7 @@ TEST_F(TestQemuVMProcessSpec, resume_with_missing_machine_type_guesses_correctly
 
     mp::QemuVMProcessSpec spec(desc, platform_args, mount_args, resume_data_missing_machine_info);
 
-    EXPECT_EQ(spec.arguments(), QStringList({"-args", "-loadvm", "suspend_tag"}));
+    EXPECT_EQ(spec.arguments(), QStringList({"-args", "-loadvm", "suspend_tag"}) << mount_args.begin()->second.second);
 }
 
 TEST_F(TestQemuVMProcessSpec, ResumeFixesVmnetFormat)
@@ -109,8 +111,8 @@ TEST_F(TestQemuVMProcessSpec, ResumeFixesVmnetFormat)
 
     mp::QemuVMProcessSpec spec(desc, platform_args, mount_args, resume_data);
 
-    EXPECT_EQ(spec.arguments(),
-              QStringList({"vmnet-shared,foo", "-loadvm", "suspend_tag", "-machine", "machine_type"}));
+    EXPECT_EQ(spec.arguments(), QStringList({"vmnet-shared,foo", "-loadvm", "suspend_tag", "-machine", "machine_type"})
+                                    << mount_args.begin()->second.second);
 }
 
 TEST_F(TestQemuVMProcessSpec, apparmorProfileIncludesFileMountPerms)
@@ -182,6 +184,29 @@ TEST_F(TestQemuVMProcessSpec, apparmor_profile_not_running_as_snap_correct)
     mp::QemuVMProcessSpec spec(desc, platform_args, mount_args, std::nullopt);
 
     EXPECT_TRUE(spec.apparmor_profile().contains("signal (receive) peer=unconfined"));
-    EXPECT_TRUE(spec.apparmor_profile().contains("/usr/share/{seabios,ovmf,qemu-efi}/* r,"));
+    EXPECT_TRUE(spec.apparmor_profile().contains("/usr{,/local}/share/{seabios,ovmf,qemu,qemu-efi}/* r,"));
     EXPECT_TRUE(spec.apparmor_profile().contains(" /usr/bin/qemu-system-")); // space wanted
+}
+
+TEST_F(TestQemuVMProcessSpec, apparmor_profile_lets_bridge_helper_run_in_snap)
+{
+    const QByteArray snap_name{"multipass"};
+    QTemporaryDir snap_dir;
+
+    mpt::SetEnvScope e("SNAP", snap_dir.path().toUtf8());
+    mpt::SetEnvScope e2("SNAP_NAME", snap_name);
+    mp::QemuVMProcessSpec spec(desc, platform_args, mount_args, std::nullopt);
+
+    EXPECT_TRUE(spec.apparmor_profile().contains(QString(" %1/bin/bridge_helper").arg(snap_dir.path())));
+}
+
+TEST_F(TestQemuVMProcessSpec, apparmor_profile_lets_bridge_helper_run_outside_snap)
+{
+    const QByteArray snap_name{"multipass"};
+
+    mpt::UnsetEnvScope e("SNAP");
+    mpt::SetEnvScope e2("SNAP_NAME", snap_name);
+    mp::QemuVMProcessSpec spec(desc, platform_args, mount_args, std::nullopt);
+
+    EXPECT_TRUE(spec.apparmor_profile().contains(" /bin/bridge_helper"));
 }

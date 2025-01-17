@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -24,6 +24,8 @@
 #include <multipass/ssh/sftp_utils.h>
 
 #include <fmt/std.h>
+
+#include <QRegularExpression>
 
 namespace mp = multipass;
 namespace cmd = multipass::cmd;
@@ -57,9 +59,9 @@ mp::ReturnCode cmd::Transfer::run(mp::ArgParser* parser)
                     auto& [sources, target] = *args;
                     std::error_code err;
                     if (sources.size() > 1 && !MP_FILEOPS.is_directory(target, err) && !err)
-                        throw std::runtime_error{fmt::format("Target {} is not a directory", target)};
+                        throw std::runtime_error{fmt::format("Target {:?} is not a directory", target)};
                     else if (err)
-                        throw std::runtime_error{fmt::format("Cannot access {}: {}", target, err.message())};
+                        throw std::runtime_error{fmt::format("Cannot access {:?}: {}", target, err.message())};
                     for (auto [s, s_end] = sources.equal_range(instance_name); s != s_end; ++s)
                         success &= sftp_client->pull(s->second, target, flags);
                 }
@@ -68,7 +70,7 @@ mp::ReturnCode cmd::Transfer::run(mp::ArgParser* parser)
                 {
                     auto& [sources, target] = *args;
                     if (sources.size() > 1 && !sftp_client->is_remote_dir(target))
-                        throw std::runtime_error{fmt::format("Target {} is not a directory", target)};
+                        throw std::runtime_error{fmt::format("Target {:?} is not a directory", target)};
                     for (const auto& source : sources)
                         success &= sftp_client->push(source, target, flags);
                 }
@@ -163,9 +165,16 @@ std::vector<std::pair<std::string, fs::path>> cmd::Transfer::args_to_instance_an
     instance_entry_args.reserve(args.size());
     for (const auto& entry : args)
     {
+        // this is needed so that Windows absolute paths are not split at the colon following the drive letter
+        if (QRegularExpression{R"(^[A-Za-z]:\\.*)"}.match(entry).hasMatch())
+        {
+            instance_entry_args.emplace_back("", entry.toStdString());
+            continue;
+        }
+
         const auto source_components = entry.split(':');
         const auto instance_name = source_components.size() == 1 ? "" : source_components.first().toStdString();
-        const auto file_path = source_components.size() == 1 ? source_components.first() : source_components.at(1);
+        const auto file_path = source_components.size() == 1 ? source_components.first() : entry.section(':', 1);
         if (!instance_name.empty())
             request.add_instance_name()->append(instance_name);
         instance_entry_args.emplace_back(instance_name, file_path.isEmpty() ? "." : file_path.toStdString());

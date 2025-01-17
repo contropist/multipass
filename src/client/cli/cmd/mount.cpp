@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -16,8 +16,10 @@
  */
 
 #include "mount.h"
-#include "common_cli.h"
+
 #include "animated_spinner.h"
+#include "common_callbacks.h"
+#include "common_cli.h"
 
 #include <multipass/cli/argparser.h>
 #include <multipass/cli/client_platform.h>
@@ -27,6 +29,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QRegularExpression>
 
 namespace mp = multipass;
 namespace mcp = multipass::cli::platform;
@@ -83,23 +86,7 @@ mp::ReturnCode cmd::Mount::run(mp::ArgParser* parser)
         return standard_failure_handler_for(name(), cerr, status);
     };
 
-    auto streaming_callback = [this, &spinner](mp::MountReply& reply,
-                                               grpc::ClientReaderWriterInterface<MountRequest, MountReply>* client) {
-        if (!reply.log_line().empty())
-        {
-            spinner.print(cerr, reply.log_line());
-        }
-
-        if (reply.credentials_requested())
-        {
-            spinner.stop();
-
-            return cmd::handle_user_password(client, term);
-        }
-
-        spinner.stop();
-        spinner.start(reply.reply_message());
-    };
+    auto streaming_callback = make_iterative_spinner_callback<MountRequest, MountReply>(spinner, *term);
 
     request.set_verbosity_level(parser->verbosityLevel());
 
@@ -126,21 +113,19 @@ mp::ParseCode cmd::Mount::parse_args(mp::ArgParser* parser)
     parser->addPositionalArgument("target",
                                   "Target mount points, in <name>[:<path>] format, where <name> "
                                   "is an instance name, and optional <path> is the mount point. "
-                                  "If omitted, the mount point will be the same as the source's "
-                                  "absolute path",
+                                  "If omitted, the mount point will be under /home/ubuntu/<source-dir>, "
+                                  "where <source-dir> is the name of the <source> directory.",
                                   "<target> [<target> ...]");
 
     QCommandLineOption gid_mappings({"g", "gid-map"},
-                                    "A mapping of group IDs for use in the mount. "
-                                    "File and folder ownership will be mapped from "
-                                    "<host> to <instance> inside the instance. Can be "
-                                    "used multiple times.",
+                                    "A mapping of group IDs for use in the mount. File and folder ownership will be "
+                                    "mapped from <host> to <instance> inside the instance. Can be used multiple times. "
+                                    "Mappings can only be specified as a one-to-one relationship.",
                                     "host>:<instance");
     QCommandLineOption uid_mappings({"u", "uid-map"},
-                                    "A mapping of user IDs for use in the mount. "
-                                    "File and folder ownership will be mapped from "
-                                    "<host> to <instance> inside the instance. Can be "
-                                    "used multiple times.",
+                                    "A mapping of user IDs for use in the mount. File and folder ownership will be "
+                                    "mapped from <host> to <instance> inside the instance. Can be used multiple times. "
+                                    "Mappings can only be specified as a one-to-one relationship.",
                                     "host>:<instance");
     QCommandLineOption mount_type_option({"t", "type"},
                                          "Specify the type of mount to use.\n"
@@ -195,18 +180,10 @@ mp::ParseCode cmd::Mount::parse_args(mp::ArgParser* parser)
 
         auto entry = request.add_target_paths();
         entry->set_instance_name(instance_name.toStdString());
-
-        if (target_path.isEmpty())
-        {
-            entry->set_target_path(source_path.toStdString());
-        }
-        else
-        {
-            entry->set_target_path(target_path.toStdString());
-        }
+        entry->set_target_path(target_path.toStdString());
     }
 
-    QRegExp map_matcher("^([0-9]+[:][0-9]+)$");
+    QRegularExpression map_matcher("^([0-9]+[:][0-9]+)$");
 
     request.clear_mount_maps();
     auto mount_maps = request.mutable_mount_maps();
@@ -217,7 +194,7 @@ mp::ParseCode cmd::Mount::parse_args(mp::ArgParser* parser)
 
         for (const auto& map : uid_maps)
         {
-            if (!map_matcher.exactMatch(map))
+            if (!map_matcher.match(map).hasMatch())
             {
                 cerr << "Invalid UID map given: " << map.toStdString() << "\n";
                 return ParseCode::CommandLineError;
@@ -257,7 +234,7 @@ mp::ParseCode cmd::Mount::parse_args(mp::ArgParser* parser)
 
         for (const auto& map : gid_maps)
         {
-            if (!map_matcher.exactMatch(map))
+            if (!map_matcher.match(map).hasMatch())
             {
                 cerr << "Invalid GID map given: " << map.toStdString() << "\n";
                 return ParseCode::CommandLineError;

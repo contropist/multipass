@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -31,11 +31,13 @@ TEST_P(UniqueIdMappingsTestSuite, UniqueIdMappingsWorks)
 {
     auto [input_mappings, expected_mappings] = GetParam();
 
-    ASSERT_EQ(mp::unique_id_mappings(input_mappings), expected_mappings);
+    mp::unique_id_mappings(input_mappings);
+    ASSERT_EQ(input_mappings, expected_mappings);
 }
 
-INSTANTIATE_TEST_SUITE_P(IdMappings, UniqueIdMappingsTestSuite,
+INSTANTIATE_TEST_SUITE_P(IdMappings,
+                         UniqueIdMappingsTestSuite,
                          Values(std::make_pair(mp::id_mappings{{1, 1}, {2, 1}, {1, 1}, {1, 2}},
-                                               mp::id_mappings{{1, 1}, {2, 1}, {1, 2}}),
+                                               mp::id_mappings{{1, 1}}),
                                 std::make_pair(mp::id_mappings{{3, 4}}, mp::id_mappings{{3, 4}}),
                                 std::make_pair(mp::id_mappings{}, mp::id_mappings{})));

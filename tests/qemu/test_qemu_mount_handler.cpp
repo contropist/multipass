@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,7 +23,6 @@
 #include "tests/mock_ssh_test_fixture.h"
 #include "tests/mock_virtual_machine.h"
 #include "tests/stub_ssh_key_provider.h"
-#include "tests/stub_virtual_machine.h"
 
 #include "qemu_mount_handler.h"
 
@@ -31,408 +30,273 @@
 #include <multipass/vm_mount.h>
 
 namespace mp = multipass;
-namespace mpl = multipass::logging;
 namespace mpt = multipass::test;
 
 using namespace testing;
 
-typedef std::vector<std::pair<std::string, std::string>> CommandVector;
-
-const multipass::logging::Level default_log_level = multipass::logging::Level::debug;
-
 namespace
 {
+struct MockQemuVirtualMachine : mpt::MockVirtualMachineT<mp::QemuVirtualMachine>
+{
+    explicit MockQemuVirtualMachine(const std::string& name)
+        : mpt::MockVirtualMachineT<mp::QemuVirtualMachine>{name, mpt::StubSSHKeyProvider{}}
+    {
+    }
+
+    MOCK_METHOD(mp::QemuVirtualMachine::MountArgs&, modifiable_mount_args, (), (override));
+};
+
+struct CommandOutput
+{
+    CommandOutput(const std::string& output, int exit_code = 0) : output{output}, exit_code{exit_code}
+    {
+    }
+
+    std::string output;
+    int exit_code;
+};
+
+typedef std::unordered_map<std::string, CommandOutput> CommandOutputs;
+
+std::string command_get_existing_parent(const std::string& path)
+{
+    return fmt::format(R"(sudo /bin/bash -c 'P="{}"; while [ ! -d "$P/" ]; do P="${{P%/*}}"; done; echo $P/')", path);
+}
+
+std::string tag_from_target(const std::string& target)
+{
+    return mp::utils::make_uuid(target).remove("-").left(30).prepend('m').toStdString();
+}
+
+std::string command_mount(const std::string& target)
+{
+    return fmt::format("sudo mount -t 9p {} {} -o trans=virtio,version=9p2000.L,msize=536870912",
+                       tag_from_target(target), target);
+}
+
+std::string command_umount(const std::string& target)
+{
+    return fmt::format("if mountpoint -q {0}; then sudo umount {0}; else true; fi", target);
+}
+
+std::string command_mkdir(const std::string& parent, const std::string& missing)
+{
+    return fmt::format("sudo /bin/bash -c 'cd \"{}\" && mkdir -p \"{}\"'", parent, missing);
+}
+
+std::string command_chown(const std::string& parent, const std::string& missing, int uid, int gid)
+{
+    return fmt::format("sudo /bin/bash -c 'cd \"{}\" && chown -R {}:{} \"{}\"'", parent, uid, gid,
+                       missing.substr(0, missing.find_first_of('/')));
+}
+
+std::string command_findmnt(const std::string& target)
+{
+    return fmt::format("findmnt --type 9p | grep '{} {}'", target, tag_from_target(target));
+}
+
 struct QemuMountHandlerTest : public ::Test
 {
-    void start_mount(std::optional<std::string> target = std::nullopt)
+    QemuMountHandlerTest()
     {
-        mp::QemuMountHandler qemu_mount_handler(key_provider);
-
-        qemu_mount_handler.start_mount(&vm, &server, target.value_or(default_target));
+        EXPECT_CALL(mock_file_ops, status)
+            .WillOnce(Return(mp::fs::file_status{mp::fs::file_type::directory, mp::fs::perms::all}));
+        EXPECT_CALL(vm, modifiable_mount_args).WillOnce(ReturnRef(mount_args));
     }
 
-    auto make_exec_that_fails_for(const std::vector<std::string>& expected_cmds, bool& invoked)
+    // the returned lambda will modify `output` so that it can be used to mock ssh_channel_read_timeout
+    auto mocked_ssh_channel_request_exec(std::string& output)
     {
-        auto request_exec = [this, expected_cmds, &invoked](ssh_channel, const char* raw_cmd) {
-            std::string cmd{raw_cmd};
-
-            for (const auto& expected_cmd : expected_cmds)
+        return [&](ssh_channel, const char* command) {
+            if (const auto it = command_outputs.find(command); it != command_outputs.end())
             {
-                if (cmd.find(expected_cmd) != std::string::npos)
-                {
-                    invoked = true;
-                    exit_status_mock.return_exit_code(SSH_ERROR);
-                }
+                output = it->second.output;
+                exit_status_mock.set_exit_status(it->second.exit_code);
             }
-            return SSH_OK;
-        };
-        return request_exec;
-    }
-
-    // The 'invoked' parameter binds the execution and read mocks. We need a better mechanism to make them
-    // cooperate better, i.e., make the reader read only when a command was issued.
-    auto make_exec_to_check_commands(const CommandVector& commands, std::string::size_type& remaining,
-                                     CommandVector::const_iterator& next_expected_cmd, std::string& output,
-                                     bool& invoked, std::optional<std::string>& fail_cmd,
-                                     std::optional<bool>& fail_invoked)
-    {
-        *fail_invoked = false;
-
-        auto request_exec = [this, &commands, &remaining, &next_expected_cmd, &output, &invoked, &fail_cmd,
-                             &fail_invoked](ssh_channel, const char* raw_cmd) {
-            invoked = false;
-
-            std::string cmd{raw_cmd};
-
-            if (fail_cmd && cmd.find(*fail_cmd) != std::string::npos)
+            else
             {
-                if (fail_invoked)
-                {
-                    *fail_invoked = true;
-                }
-                exit_status_mock.return_exit_code(SSH_ERROR);
-            }
-            else if (next_expected_cmd != commands.end())
-            {
-                // Check if the first element of the given commands list is what we are expecting. In that case,
-                // give the correct answer. If not, check the rest of the list to see if we broke the execution
-                // order.
-                auto pred = [&cmd](auto it) { return cmd == it.first; };
-                CommandVector::const_iterator found_cmd = std::find_if(next_expected_cmd, commands.end(), pred);
-
-                if (found_cmd == next_expected_cmd)
-                {
-                    invoked = true;
-                    output = next_expected_cmd->second;
-                    remaining = output.size();
-                    ++next_expected_cmd;
-
-                    return SSH_OK;
-                }
-                else if (found_cmd != commands.end())
-                {
-                    output = found_cmd->second;
-                    remaining = output.size();
-                    ADD_FAILURE() << "\"" << (found_cmd->first) << "\" executed out of order; expected \""
-                                  << next_expected_cmd->first << "\"";
-
-                    return SSH_OK;
-                }
-            }
-
-            // If the command list was entirely checked or if the executed command is not on the list, check the
-            // default commands to see if there is an answer to the current command.
-            auto it = default_cmds.find(cmd);
-            if (it != default_cmds.end())
-            {
-                output = it->second;
-                remaining = output.size();
-                invoked = true;
+                ADD_FAILURE() << "unexpected command: " << command;
             }
 
             return SSH_OK;
         };
-
-        return request_exec;
     }
 
-    auto make_channel_read_return(const std::string& output, std::string::size_type& remaining, bool& prereq_invoked)
+    static auto mocked_ssh_channel_read_timeout(const std::string& output)
     {
-        auto channel_read = [&output, &remaining, &prereq_invoked](ssh_channel, void* dest, uint32_t count,
-                                                                   int is_stderr, int) {
-            if (!prereq_invoked)
-                return 0u;
-            const auto num_to_copy = std::min(count, static_cast<uint32_t>(remaining));
-            const auto begin = output.begin() + output.size() - remaining;
-            std::copy_n(begin, num_to_copy, reinterpret_cast<char*>(dest));
-            remaining -= num_to_copy;
-            return num_to_copy;
+        return [&, copied = 0u](auto, void* dest, uint32_t count, auto...) mutable {
+            auto n = std::min(static_cast<std::string::size_type>(count), output.size() - copied);
+            std::copy_n(output.begin() + copied, n, static_cast<char*>(dest));
+            n ? copied += n : copied = 0;
+            return n;
         };
-        return channel_read;
-    }
-
-    void test_command_execution(const CommandVector& commands, std::optional<std::string> target = std::nullopt,
-                                std::optional<std::string> fail_cmd = std::nullopt,
-                                std::optional<bool> fail_invoked = std::nullopt)
-    {
-        bool invoked{false};
-        std::string output;
-        auto remaining = output.size();
-        CommandVector::const_iterator next_expected_cmd = commands.begin();
-
-        auto channel_read = make_channel_read_return(output, remaining, invoked);
-        REPLACE(ssh_channel_read_timeout, channel_read);
-
-        auto request_exec = make_exec_to_check_commands(commands, remaining, next_expected_cmd, output, invoked,
-                                                        fail_cmd, fail_invoked);
-        REPLACE(ssh_channel_request_exec, request_exec);
-
-        start_mount(target.value_or(default_target));
-
-        EXPECT_TRUE(next_expected_cmd == commands.end()) << "\"" << next_expected_cmd->first << "\" not executed";
     }
 
     mpt::StubSSHKeyProvider key_provider;
     std::string default_source{"source"}, default_target{"target"};
+    mp::id_mappings gid_mappings{{1, 2}}, uid_mappings{{5, 6}};
+    mp::VMMount mount{default_source, gid_mappings, uid_mappings, mp::VMMount::MountType::Native};
     mpt::MockFileOps::GuardedMock mock_file_ops_injection = mpt::MockFileOps::inject();
     mpt::MockFileOps& mock_file_ops = *mock_file_ops_injection.first;
-    mp::id_mappings gid_mappings{{1, 2}}, uid_mappings{{5, -1}};
-    mpt::MockLogger::Scope logger_scope = mpt::MockLogger::inject(default_log_level);
+    mpt::MockLogger::Scope logger_scope = mpt::MockLogger::inject(mpl::Level::debug);
     mpt::MockServerReaderWriter<mp::MountReply, mp::MountRequest> server;
     mpt::MockSSHTestFixture mock_ssh_test_fixture;
     mpt::ExitStatusMock exit_status_mock;
-    mpt::MockVirtualMachine vm{"my_instance"};
-
-    const std::unordered_map<std::string, std::string> default_cmds{
-        {"echo $PWD/target", "/home/ubuntu/target\n"},
-        {"sudo /bin/bash -c 'P=\"/home/ubuntu/target\"; while [ ! -d \"$P/\" ]; do P=\"${P%/*}\"; done; echo $P/'\n",
-         "/home/ubuntu/target\n"},
-        {"id -u", "1000\n"},
-        {"id -g", "1000\n"},
-        {"sudo mount -t 9p /my/source/path -o trans=virtio,version=9p2000.L,msize=536870912\n", "don't care\n"},
-        {"sudo umount /my/source/path\n", "don't care\n"}};
+    NiceMock<MockQemuVirtualMachine> vm{"my_instance"};
+    mp::QemuVirtualMachine::MountArgs mount_args;
+    CommandOutputs command_outputs{
+        {"echo $PWD/target", {"/home/ubuntu/target"}},
+        {command_get_existing_parent("/home/ubuntu/target"), {"/home/ubuntu/target"}},
+        {"id -u", {"1000"}},
+        {"id -g", {"1000"}},
+        {command_mount(default_target), {""}},
+        {command_umount(default_target), {""}},
+        {command_findmnt(default_target), {""}},
+    };
 };
 
-// Mocks an incorrect return from a given command.
-struct QemuMountFail : public QemuMountHandlerTest, public testing::WithParamInterface<std::string>
+struct QemuMountHandlerFailCommand : public QemuMountHandlerTest, public testing::WithParamInterface<std::string>
 {
-};
+    const std::string parent = "/home/ubuntu";
+    const std::string missing = "target";
 
-struct QemuMountExecute : public QemuMountHandlerTest,
-                          public testing::WithParamInterface<std::pair<std::string, CommandVector>>
-{
+    QemuMountHandlerFailCommand()
+    {
+        command_outputs.at(command_get_existing_parent("/home/ubuntu/target")) = parent;
+        command_outputs.insert({command_mkdir(parent, missing), {""}});
+        command_outputs.insert({command_chown(parent, missing, 1000, 1000), {""}});
+    }
 };
-
-struct QemuMountExecuteAndNoFail
-    : public QemuMountHandlerTest,
-      public testing::WithParamInterface<std::tuple<std::string, CommandVector, std::string>>
-{
-};
-
 } // namespace
 
-//
-// Define some parameterized test fixtures.
-//
-
-TEST_P(QemuMountFail, testFailedInvocation)
-{
-    bool invoked_cmd{false};
-    std::string output;
-    std::string::size_type remaining;
-
-    auto channel_read = make_channel_read_return(output, remaining, invoked_cmd);
-    REPLACE(ssh_channel_read_timeout, channel_read);
-
-    CommandVector empty;
-    CommandVector::const_iterator it = empty.end();
-    std::optional<std::string> fail_cmd = std::make_optional(GetParam());
-    std::optional<bool> invoked_fail = std::make_optional(false);
-    auto request_exec = make_exec_to_check_commands(empty, remaining, it, output, invoked_cmd, fail_cmd, invoked_fail);
-    REPLACE(ssh_channel_request_exec, request_exec);
-
-    EXPECT_THROW(start_mount(), std::runtime_error);
-    EXPECT_TRUE(*invoked_fail);
-}
-
-TEST_P(QemuMountExecute, testSuccesfulInvocation)
-{
-    std::string target = GetParam().first;
-    CommandVector commands = GetParam().second;
-
-    test_command_execution(commands, target);
-}
-
-TEST_P(QemuMountExecuteAndNoFail, testSuccesfulInvocationAndFail)
-{
-    std::string target = std::get<0>(GetParam());
-    CommandVector commands = std::get<1>(GetParam());
-    std::string fail_command = std::get<2>(GetParam());
-
-    ASSERT_NO_THROW(test_command_execution(commands, target, fail_command));
-}
-
-//
-// Instantiate the parameterized tests suites from above.
-//
-
-INSTANTIATE_TEST_SUITE_P(QemuMountThrowWhenError, QemuMountFail,
-                         testing::Values("mkdir", "chown", "id -u", "id -g", "cd", "echo $PWD", "mount"));
-
-INSTANTIATE_TEST_SUITE_P(
-    QemuMountSuccess, QemuMountExecute,
-    testing::Values(
-        // Commands to check that it works with a path containing a space.
-        std::make_pair("unsc infinity", CommandVector{{"echo $PWD/unsc\\ infinity", "/home/ubuntu/unsc infinity\n"},
-                                                      {"sudo /bin/bash -c 'P=\"/home/ubuntu/unsc infinity\"; while [ ! "
-                                                       "-d \"$P/\" ]; do P=\"${P%/*}\"; done; echo $P/'",
-                                                       "/home/ubuntu/\n"}}),
-        // Commands to check that the ~ expansion works.
-        std::make_pair("~/target", CommandVector{{"echo ~/target", "/home/ubuntu/target\n"},
-                                                 {"sudo /bin/bash -c 'P=\"/home/ubuntu/target\"; while [ ! -d \"$P/\" "
-                                                  "]; do P=\"${P%/*}\"; done; echo $P/'",
-                                                  "/home/ubuntu/\n"}}),
-        // Commands to check that the ~user expansion works (assuming that user exists).
-        std::make_pair("~ubuntu/target", CommandVector{{"echo ~ubuntu/target", "/home/ubuntu/target\n"},
-                                                       {"sudo /bin/bash -c 'P=\"/home/ubuntu/target\"; while [ ! -d "
-                                                        "\"$P/\" ]; do P=\"${P%/*}\"; done; echo $P/'",
-                                                        "/home/ubuntu/\n"}}),
-        // Commands to check that the handler works if an absolute path is given.
-        std::make_pair("/home/ubuntu/target", CommandVector{{"sudo /bin/bash -c 'P=\"/home/ubuntu/target\"; while [ ! "
-                                                             "-d \"$P/\" ]; do P=\"${P%/*}\"; done; echo $P/'",
-                                                             "/home/ubuntu/\n"}}),
-        // Commands to check that it works for a nonexisting path.
-        std::make_pair("/nonexisting/path", CommandVector{{"sudo /bin/bash -c 'P=\"/nonexisting/path\"; while [ ! -d "
-                                                           "\"$P/\" ]; do P=\"${P%/*}\"; done; echo $P/'",
-                                                           "/\n"}})));
-
-// Commands to test that when a mount path already exists, no mkdir nor chown is ran.
-INSTANTIATE_TEST_SUITE_P(
-    QemuMountSuccessAndAvoidCommands, QemuMountExecuteAndNoFail,
-    testing::Values(std::make_tuple("target",
-                                    CommandVector{{"sudo /bin/bash -c 'P=\"/home/ubuntu/target\"; while [ ! -d \"$P/\" "
-                                                   "]; do P=\"${P%/*}\"; done; echo $P/'",
-                                                   "/home/ubuntu/target/\n"}},
-                                    "mkdir"),
-                    std::make_tuple("target",
-                                    CommandVector{{"sudo /bin/bash -c 'P=\"/home/ubuntu/target\"; while [ ! -d \"$P/\" "
-                                                   "]; do P=\"${P%/*}\"; done; echo $P/'",
-                                                   "/home/ubuntu/target/\n"}},
-                                    "chown")));
-
-TEST_F(QemuMountHandlerTest, mountFailsOnNotStoppedState)
+TEST_F(QemuMountHandlerTest, mount_fails_when_vm_not_stopped)
 {
     EXPECT_CALL(vm, current_state()).WillOnce(Return(mp::VirtualMachine::State::running));
-
-    mp::QemuMountHandler qemu_mount_handler(key_provider);
-
-    const mp::VMMount mount{default_source, gid_mappings, uid_mappings, mp::VMMount::MountType::Native};
-
-    EXPECT_THROW(
-        try { qemu_mount_handler.init_mount(&vm, default_target, mount); } catch (const std::runtime_error& e) {
-            EXPECT_STREQ(e.what(), "Please shutdown virtual machine before defining native mount.");
-            throw;
-        },
-        std::runtime_error);
+    MP_EXPECT_THROW_THAT(
+        mp::QemuMountHandler(&vm, &key_provider, default_target, mount), mp::NativeMountNeedsStoppedVMException,
+        mpt::match_what(AllOf(HasSubstr("Please stop the instance"), HasSubstr("before attempting native mounts."))));
 }
 
-TEST_F(QemuMountHandlerTest, mountFailsOnNonExistentPath)
+TEST_F(QemuMountHandlerTest, mount_fails_on_multiple_id_mappings)
 {
-    EXPECT_CALL(mock_file_ops, exists(A<const QDir&>())).WillOnce(Return(false));
-    EXPECT_CALL(vm, current_state()).WillOnce(Return(mp::VirtualMachine::State::off));
-
-    mp::QemuMountHandler qemu_mount_handler(key_provider);
-
-    const mp::VMMount mount{default_source, gid_mappings, uid_mappings, mp::VMMount::MountType::Native};
-
-    EXPECT_THROW(
-        try { qemu_mount_handler.init_mount(&vm, default_target, mount); } catch (const std::runtime_error& e) {
-            EXPECT_STREQ(e.what(), "Mount path \"source\" does not exist.");
-            throw;
-        },
-        std::runtime_error);
-}
-
-TEST_F(QemuMountHandlerTest, mountFailsOnMultipleUIDs)
-{
-    EXPECT_CALL(mock_file_ops, exists(A<const QDir&>())).WillOnce(Return(true));
-    EXPECT_CALL(vm, current_state()).WillOnce(Return(mp::VirtualMachine::State::off));
-
-    mp::QemuMountHandler qemu_mount_handler(key_provider);
-
     const mp::VMMount mount{default_source, {{1, 2}, {3, 4}}, {{5, -1}, {6, 10}}, mp::VMMount::MountType::Native};
-
-    EXPECT_THROW(
-        try { qemu_mount_handler.init_mount(&vm, default_target, mount); } catch (const std::runtime_error& e) {
-            EXPECT_STREQ(e.what(), "Only one mapping per native mount allowed.");
-            throw;
-        },
-        std::runtime_error);
+    MP_EXPECT_THROW_THAT(mp::QemuMountHandler(&vm, &key_provider, default_target, mount), std::runtime_error,
+                         mpt::match_what(StrEq("Only one mapping per native mount allowed.")));
 }
 
-TEST_F(QemuMountHandlerTest, hasInstanceAlreadyMountedReturnsTrueWhenFound)
+TEST_F(QemuMountHandlerTest, mount_handles_mount_args)
 {
-    EXPECT_CALL(mock_file_ops, exists(A<const QDir&>())).WillOnce(Return(true));
-    EXPECT_CALL(vm, current_state()).WillOnce(Return(mp::VirtualMachine::State::off));
+    {
+        mp::MountHandler::UPtr mount_handler;
+        EXPECT_NO_THROW(mount_handler =
+                            std::make_unique<mp::QemuMountHandler>(&vm, &key_provider, default_target, mount));
+        EXPECT_EQ(mount_args.size(), 1);
+        const auto uid_arg = QString("uid_map=%1:%2,").arg(uid_mappings.front().first).arg(uid_mappings.front().second);
+        const auto gid_arg = QString{"gid_map=%1:%2,"}.arg(gid_mappings.front().first).arg(gid_mappings.front().second);
+        EXPECT_EQ(mount_args.begin()->second.second.join(' ').toStdString(),
+                  fmt::format("-virtfs local,security_model=passthrough,{}{}path={},mount_tag={}",
+                              uid_arg,
+                              gid_arg,
+                              mount.get_source_path(),
+                              tag_from_target(default_target)));
+    }
 
-    mp::QemuMountHandler qemu_mount_handler(key_provider);
-
-    const mp::VMMount mount{default_source, gid_mappings, uid_mappings, mp::VMMount::MountType::Native};
-    EXPECT_CALL(vm, add_vm_mount(default_target, mount)).WillOnce(Return());
-
-    qemu_mount_handler.init_mount(&vm, default_target, mount);
-
-    EXPECT_TRUE(qemu_mount_handler.has_instance_already_mounted(vm.vm_name, default_target));
+    EXPECT_EQ(mount_args.size(), 0);
 }
 
-TEST_F(QemuMountHandlerTest, hasInstanceAlreadyMountedReturnsFalseWhenFound)
+TEST_F(QemuMountHandlerTest, mount_logs_init)
 {
-    EXPECT_CALL(mock_file_ops, exists(A<const QDir&>())).WillOnce(Return(true));
-    EXPECT_CALL(vm, current_state()).WillOnce(Return(mp::VirtualMachine::State::off));
-
-    mp::QemuMountHandler qemu_mount_handler(key_provider);
-
-    const mp::VMMount mount{default_source, gid_mappings, uid_mappings, mp::VMMount::MountType::Native};
-    EXPECT_CALL(vm, add_vm_mount(default_target, mount)).WillOnce(Return());
-
-    qemu_mount_handler.init_mount(&vm, default_target, mount);
-
-    EXPECT_FALSE(qemu_mount_handler.has_instance_already_mounted(vm.vm_name, "/bad/path"));
+    logger_scope.mock_logger->expect_log(
+        mpl::Level::info,
+        fmt::format("initializing native mount {} => {} in '{}'", mount.get_source_path(), default_target, vm.vm_name));
+    EXPECT_NO_THROW(mp::QemuMountHandler(&vm, &key_provider, default_target, mount));
 }
 
-TEST_F(QemuMountHandlerTest, stopNonExistentMountLogsMessageAndReturns)
+TEST_F(QemuMountHandlerTest, recover_from_suspended)
 {
-    logger_scope.mock_logger->screen_logs(mpl::Level::info);
-    EXPECT_CALL(*logger_scope.mock_logger,
-                log(Eq(mpl::Level::info), mpt::MockLogger::make_cstring_matcher(StrEq("qemu-mount-handler")),
-                    mpt::MockLogger::make_cstring_matcher(StrEq(
-                        fmt::format("No native mount defined for \"{}\" serving '{}'", vm.vm_name, default_target)))));
-
-    mp::QemuMountHandler qemu_mount_handler(key_provider);
-
-    qemu_mount_handler.stop_mount(vm.vm_name, default_target);
+    mount_args[tag_from_target(default_target)] = {};
+    EXPECT_CALL(vm, current_state()).WillOnce(Return(mp::VirtualMachine::State::suspended));
+    logger_scope.mock_logger->expect_log(mpl::Level::info,
+                                         fmt::format("Found native mount {} => {} in '{}' while suspended",
+                                                     mount.get_source_path(),
+                                                     default_target,
+                                                     vm.vm_name));
+    EXPECT_NO_THROW(mp::QemuMountHandler(&vm, &key_provider, default_target, mount));
 }
 
-TEST_F(QemuMountHandlerTest, stopAllMountsForInstanceWithNoMountsLogsMessageAndReturns)
+TEST_F(QemuMountHandlerTest, start_success_stop_success)
 {
-    logger_scope.mock_logger->screen_logs(mpl::Level::info);
-    EXPECT_CALL(*logger_scope.mock_logger,
-                log(Eq(mpl::Level::info), mpt::MockLogger::make_cstring_matcher(StrEq("qemu-mount-handler")),
-                    mpt::MockLogger::make_cstring_matcher(
-                        StrEq(fmt::format("No native mounts to stop for instance \"{}\"", vm.vm_name)))));
+    std::string ssh_command_output;
+    REPLACE(ssh_channel_request_exec, mocked_ssh_channel_request_exec(ssh_command_output));
+    REPLACE(ssh_channel_read_timeout, mocked_ssh_channel_read_timeout(ssh_command_output));
 
-    mp::QemuMountHandler qemu_mount_handler(key_provider);
-
-    qemu_mount_handler.stop_all_mounts_for_instance(vm.vm_name);
+    mp::QemuMountHandler handler{&vm, &key_provider, default_target, mount};
+    EXPECT_NO_THROW(handler.activate(&server));
+    EXPECT_NO_THROW(handler.deactivate());
 }
 
-TEST_F(QemuMountHandlerTest, stopAllMountsDeletesAllMounts)
+TEST_F(QemuMountHandlerTest, stop_fail_nonforce_throws)
 {
-    bool invoked_cmd{false};
-    std::string output;
-    auto remaining = output.size();
+    auto error = "device is busy";
+    command_outputs.at(command_umount(default_target)) = {error, 1};
 
-    auto channel_read = make_channel_read_return(output, remaining, invoked_cmd);
-    REPLACE(ssh_channel_read_timeout, channel_read);
+    std::string ssh_command_output;
+    REPLACE(ssh_channel_request_exec, mocked_ssh_channel_request_exec(ssh_command_output));
+    REPLACE(ssh_channel_read_timeout, mocked_ssh_channel_read_timeout(ssh_command_output));
 
-    CommandVector empty;
-    CommandVector::const_iterator it = empty.end();
-    std::optional<std::string> fail_cmd = std::nullopt;
-    std::optional<bool> invoked_fail = std::nullopt;
-    auto request_exec = make_exec_to_check_commands(empty, remaining, it, output, invoked_cmd, fail_cmd, invoked_fail);
-    REPLACE(ssh_channel_request_exec, request_exec);
+    mp::QemuMountHandler handler{&vm, &key_provider, default_target, mount};
+    EXPECT_NO_THROW(handler.activate(&server));
+    MP_EXPECT_THROW_THAT(handler.deactivate(), std::runtime_error, mpt::match_what(StrEq(error)));
+}
 
-    EXPECT_CALL(mock_file_ops, exists(A<const QDir&>())).WillOnce(Return(true));
-    EXPECT_CALL(vm, add_vm_mount(_, _)).WillOnce(Return());
-    EXPECT_CALL(vm, delete_vm_mount(_)).WillOnce(Return());
+TEST_F(QemuMountHandlerTest, stop_fail_force_logs)
+{
+    auto error = "device is busy";
+    command_outputs.at(command_umount(default_target)) = {error, 1};
+    std::string ssh_command_output;
+    REPLACE(ssh_channel_request_exec, mocked_ssh_channel_request_exec(ssh_command_output));
+    REPLACE(ssh_channel_read_timeout, mocked_ssh_channel_read_timeout(ssh_command_output));
 
-    const mp::VMMount mount{default_source, gid_mappings, uid_mappings, mp::VMMount::MountType::Native};
-    mp::QemuMountHandler qemu_mount_handler(key_provider);
+    mp::QemuMountHandler handler{&vm, &key_provider, default_target, mount};
+    EXPECT_NO_THROW(handler.activate(&server));
+    EXPECT_CALL(*logger_scope.mock_logger, log).WillRepeatedly(Return());
+    logger_scope.mock_logger->expect_log(
+        mpl::Level::warning,
+        fmt::format("Failed to gracefully stop mount \"{}\" in instance '{}': {}", default_target, vm.vm_name, error));
+}
 
-    qemu_mount_handler.init_mount(&vm, default_target, mount);
-    qemu_mount_handler.start_mount(&vm, &server, default_target);
+TEST_F(QemuMountHandlerTest, target_directory_missing)
+{
+    const std::string parent = "/home/ubuntu";
+    const std::string missing = "target";
 
-    EXPECT_TRUE(qemu_mount_handler.has_instance_already_mounted(vm.vm_name, default_target));
-    qemu_mount_handler.stop_mount(vm.vm_name, default_target);
-    EXPECT_FALSE(qemu_mount_handler.has_instance_already_mounted(vm.vm_name, default_target));
+    command_outputs.at(command_get_existing_parent("/home/ubuntu/target")) = parent;
+    command_outputs.insert({command_mkdir(parent, missing), {""}});
+    command_outputs.insert({command_chown(parent, missing, 1000, 1000), {""}});
+
+    std::string ssh_command_output;
+    REPLACE(ssh_channel_request_exec, mocked_ssh_channel_request_exec(ssh_command_output));
+    REPLACE(ssh_channel_read_timeout, mocked_ssh_channel_read_timeout(ssh_command_output));
+
+    mp::QemuMountHandler handler{&vm, &key_provider, default_target, mount};
+    EXPECT_NO_THROW(handler.activate(&server));
+}
+
+INSTANTIATE_TEST_SUITE_P(QemuMountHandlerFailCommand, QemuMountHandlerFailCommand,
+                         testing::Values(command_mkdir("/home/ubuntu", "target"),
+                                         command_chown("/home/ubuntu", "target", 1000, 1000), "id -u", "id -g",
+                                         command_mount("target"), command_get_existing_parent("/home/ubuntu/target")));
+
+TEST_P(QemuMountHandlerFailCommand, throw_on_fail)
+{
+    const auto cmd = GetParam();
+    const auto error = "failed: " + cmd;
+    command_outputs.at(cmd) = {error, 1};
+
+    std::string ssh_command_output;
+    REPLACE(ssh_channel_request_exec, mocked_ssh_channel_request_exec(ssh_command_output));
+    REPLACE(ssh_channel_read_timeout, mocked_ssh_channel_read_timeout(ssh_command_output));
+
+    mp::QemuMountHandler handler{&vm, &key_provider, default_target, mount};
+    MP_EXPECT_THROW_THAT(handler.activate(&server), std::runtime_error, mpt::match_what(StrEq(error)));
 }

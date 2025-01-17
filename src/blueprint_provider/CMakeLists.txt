@@ -1,4 +1,4 @@
-# Copyright © 2021-2022 Canonical Ltd.
+# Copyright (C) Canonical, Ltd.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 3 as
@@ -18,6 +18,6 @@ add_library(blueprint_provider STATIC
 target_link_libraries(blueprint_provider PRIVATE
   poco_utils
   network
-  Qt5::Core
+  Qt6::Core
   utils
   yaml)

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -61,6 +61,7 @@
 namespace mp = multipass;
 namespace mcp = multipass::cli::platform;
 namespace mpt = multipass::test;
+namespace mpu = multipass::utils;
 using namespace testing;
 
 namespace
@@ -135,6 +136,20 @@ struct MockDaemonRpc : public mp::DaemonRpc
                 (grpc::ServerContext * context,
                  (grpc::ServerReaderWriter<mp::AuthenticateReply, mp::AuthenticateRequest> * server)),
                 (override));
+    MOCK_METHOD(grpc::Status,
+                snapshot,
+                (grpc::ServerContext * context,
+                 (grpc::ServerReaderWriter<mp::SnapshotReply, mp::SnapshotRequest> * server)),
+                (override));
+    MOCK_METHOD(grpc::Status,
+                restore,
+                (grpc::ServerContext * context,
+                 (grpc::ServerReaderWriter<mp::RestoreReply, mp::RestoreRequest> * server)),
+                (override));
+    MOCK_METHOD(grpc::Status,
+                clone,
+                (grpc::ServerContext * context, (grpc::ServerReaderWriter<mp::CloneReply, mp::CloneRequest> * server)),
+                (override));
 };
 
 struct Client : public Test
@@ -154,9 +169,6 @@ struct Client : public Test
             .Times(AnyNumber())
             .WillRepeatedly(Return("")); /* Avoid writing to Windows Terminal settings. We use an "expectation" so that
                                             it gets reset at the end of each test (by VerifyAndClearExpectations) */
-
-        EXPECT_CALL(*client_cert_provider, PEM_certificate()).WillOnce(Return(mpt::client_cert));
-        EXPECT_CALL(*client_cert_provider, PEM_signing_key()).WillOnce(Return(mpt::client_key));
     }
 
     void TearDown() override
@@ -170,7 +182,7 @@ struct Client : public Test
 
     int setup_client_and_run(const std::vector<std::string>& command, mp::Terminal& term)
     {
-        mp::ClientConfig client_config{server_address, std::move(client_cert_provider), &term};
+        mp::ClientConfig client_config{server_address, get_client_cert_provider(), &term};
         mp::Client client{client_config};
         QStringList args = QStringList() << "multipass_test";
 
@@ -324,7 +336,7 @@ struct Client : public Test
 
             for (mp::InstanceStatus_Status status : statuses)
             {
-                auto list_entry = list_reply.add_instances();
+                auto list_entry = list_reply.mutable_instance_list()->add_instances();
                 list_entry->mutable_instance_status()->set_status(status);
             }
 
@@ -341,14 +353,17 @@ struct Client : public Test
     }
 
     template <typename ReplyType, typename RequestType, typename Matcher>
-    auto check_request_and_return(const Matcher& matcher, const grpc::Status& status)
+    auto check_request_and_return(const Matcher& matcher,
+                                  const grpc::Status& status,
+                                  const ReplyType& reply = ReplyType{})
     {
-        return [&matcher, &status](grpc::ServerReaderWriter<ReplyType, RequestType>* server) {
+        return [&matcher, &status, reply = std::move(reply)](grpc::ServerReaderWriter<ReplyType, RequestType>* server) {
             RequestType request;
             server->Read(&request);
 
             EXPECT_THAT(request, matcher);
 
+            server->Write(std::move(reply));
             return status;
         };
     }
@@ -358,8 +373,12 @@ struct Client : public Test
 #else
     std::string server_address{"unix:/tmp/test-multipassd.socket"};
 #endif
-    std::unique_ptr<mpt::MockCertProvider> client_cert_provider{std::make_unique<mpt::MockCertProvider>()};
-    std::unique_ptr<mpt::MockCertProvider> daemon_cert_provider{std::make_unique<mpt::MockCertProvider>()};
+    static std::unique_ptr<NiceMock<mpt::MockCertProvider>> get_client_cert_provider()
+    {
+        return std::make_unique<NiceMock<mpt::MockCertProvider>>();
+    };
+    std::unique_ptr<NiceMock<mpt::MockCertProvider>> daemon_cert_provider{
+        std::make_unique<NiceMock<mpt::MockCertProvider>>()};
     mpt::MockPlatform::GuardedMock attr{mpt::MockPlatform::inject<NiceMock>()};
     mpt::MockPlatform* mock_platform = attr.first;
     mpt::StubCertStore cert_store;
@@ -395,9 +414,9 @@ auto make_info_function(const std::string& source_path = "", const std::string& 
 
         mp::InfoReply info_reply;
 
-        if (request.instance_names().instance_name(0) == "primary")
+        if (request.instance_snapshot_pairs(0).instance_name() == "primary")
         {
-            auto vm_info = info_reply.add_info();
+            auto vm_info = info_reply.add_details();
             vm_info->set_name("primary");
             vm_info->mutable_instance_status()->set_status(mp::InstanceStatus::RUNNING);
 
@@ -426,9 +445,32 @@ auto make_info_function(const std::string& source_path = "", const std::string& 
     return info_function;
 }
 
+mp::SSHInfo make_ssh_info(const std::string& host = "222.222.222.222",
+                          int port = 22,
+                          const std::string& priv_key = mpt::fake_key_data,
+                          const std::string& username = "user")
+{
+    mp::SSHInfo ssh_info;
+
+    ssh_info.set_host(host);
+    ssh_info.set_port(port);
+    ssh_info.set_priv_key_base64(priv_key);
+    ssh_info.set_username(username);
+
+    return ssh_info;
+}
+
+mp::SSHInfoReply make_fake_ssh_info_response(const std::string& instance_name)
+{
+    mp::SSHInfoReply response;
+    (*response.mutable_ssh_info())[instance_name] = make_ssh_info();
+
+    return response;
+}
+
 typedef std::vector<std::pair<std::string, mp::AliasDefinition>> AliasesVector;
 
-const std::string csv_header{"Alias,Instance,Command,Working directory\n"};
+const std::string csv_header{"Alias,Instance,Command,Working directory,Context\n"};
 
 // Tests for no postional args given
 TEST_F(Client, no_command_is_error)
@@ -603,7 +645,8 @@ TEST_F(Client, transfer_cmd_local_source_instance_target)
     auto mocked_sftp_client_p = mocked_sftp_client.get();
 
     EXPECT_CALL(*mocked_sftp_utils, make_SFTPClient).WillOnce(Return(std::move(mocked_sftp_client)));
-    EXPECT_CALL(*mocked_sftp_client_p, push).WillOnce(Return(true));
+    EXPECT_CALL(*mocked_sftp_client_p, push).WillRepeatedly(Return(true));
+    EXPECT_CALL(*mocked_sftp_client_p, is_remote_dir).WillOnce(Return(true));
     EXPECT_CALL(mock_daemon, ssh_info)
         .WillOnce([](auto, grpc::ServerReaderWriter<mp::SSHInfoReply, mp::SSHInfoRequest>* server) {
             mp::SSHInfoReply reply;
@@ -612,7 +655,7 @@ TEST_F(Client, transfer_cmd_local_source_instance_target)
             return grpc::Status{};
         });
 
-    EXPECT_EQ(send_command({"transfer", "foo", "test-vm:bar"}), mp::ReturnCode::Ok);
+    EXPECT_EQ(send_command({"transfer", "foo", "C:\\Users\\file", "test-vm:bar"}), mp::ReturnCode::Ok);
 }
 
 TEST_F(Client, transfer_cmd_help_ok)
@@ -721,6 +764,27 @@ TEST_F(Client, shell_cmd_no_args_targets_petenv)
     EXPECT_CALL(mock_daemon, ssh_info)
         .WillOnce(WithArg<1>(check_request_and_return<mp::SSHInfoReply, mp::SSHInfoRequest>(petenv_matcher, ok)));
     EXPECT_THAT(send_command({"shell"}), Eq(mp::ReturnCode::Ok));
+}
+
+TEST_F(Client, shell_cmd_creates_console)
+{
+    EXPECT_CALL(mock_daemon, ssh_info)
+        .WillOnce([](auto, grpc::ServerReaderWriter<mp::SSHInfoReply, mp::SSHInfoRequest>* server) {
+            server->Write(make_fake_ssh_info_response("fake-instance"));
+            return grpc::Status{};
+        });
+
+    std::string error_string = "attempted to create console";
+    std::stringstream cerr_stream;
+
+    mpt::MockTerminal term{};
+    EXPECT_CALL(term, cin()).WillRepeatedly(ReturnRef(trash_stream));
+    EXPECT_CALL(term, cout()).WillRepeatedly(ReturnRef(trash_stream));
+    EXPECT_CALL(term, cerr()).WillRepeatedly(ReturnRef(cerr_stream));
+    EXPECT_CALL(term, make_console(_)).WillOnce(Throw(std::runtime_error(error_string)));
+
+    EXPECT_EQ(setup_client_and_run({"shell"}, term), mp::ReturnCode::CommandFail);
+    EXPECT_THAT(cerr_stream.str(), HasSubstr(error_string));
 }
 
 TEST_F(Client, shell_cmd_considers_configured_petenv)
@@ -1016,11 +1080,11 @@ TEST_F(Client, launch_cmd_memory_fails_duplicate_options)
 
 TEST_F(Client, launch_cmd_memory_deprecated_option_warning)
 {
-    std::stringstream cout_stream;
+    std::stringstream cerr_stream;
 
     EXPECT_CALL(mock_daemon, launch(_, _));
-    EXPECT_THAT(send_command({"launch", "--mem", "2048M"}, cout_stream, trash_stream), Eq(mp::ReturnCode::Ok));
-    EXPECT_NE(std::string::npos, cout_stream.str().find("warning: \"--mem\"")) << "cout has: " << cout_stream.str();
+    EXPECT_THAT(send_command({"launch", "--mem", "2048M"}, trash_stream, cerr_stream), Eq(mp::ReturnCode::Ok));
+    EXPECT_NE(std::string::npos, cerr_stream.str().find("Warning: the \"--mem\"")) << "cout has: " << cerr_stream.str();
 }
 
 TEST_F(Client, launch_cmd_cpu_option_ok)
@@ -1081,16 +1145,24 @@ TEST_F(Client, launch_cmd_cloudinit_option_with_valid_file_is_ok)
     EXPECT_THAT(send_command({"launch", "--cloud-init", qPrintable(tmpfile.fileName())}), Eq(mp::ReturnCode::Ok));
 }
 
-TEST_F(Client, launch_cmd_cloudinit_option_fails_with_missing_file)
+struct BadCloudInitFile : public Client, WithParamInterface<std::string>
+{
+};
+
+TEST_P(BadCloudInitFile, launch_cmd_cloudinit_option_fails_with_missing_file)
 {
     std::stringstream cerr_stream;
     auto missing_file{"/definitely/missing-file"};
 
     EXPECT_THAT(send_command({"launch", "--cloud-init", missing_file}, trash_stream, cerr_stream),
                 Eq(mp::ReturnCode::CommandLineError));
-    EXPECT_NE(std::string::npos, cerr_stream.str().find("No such file")) << "cerr has: " << cerr_stream.str();
+    EXPECT_NE(std::string::npos, cerr_stream.str().find("Could not load")) << "cerr has: " << cerr_stream.str();
     EXPECT_NE(std::string::npos, cerr_stream.str().find(missing_file)) << "cerr has: " << cerr_stream.str();
 }
+
+INSTANTIATE_TEST_SUITE_P(Client,
+                         BadCloudInitFile,
+                         Values("/definitely/missing-file", "/dev/null", "/home", "/root/.bashrc"));
 
 TEST_F(Client, launch_cmd_cloudinit_option_fails_no_value)
 {
@@ -1207,7 +1279,7 @@ TEST_F(Client, launch_cmd_mount_option)
     const QTemporaryDir fake_directory{};
 
     const auto fake_source = fake_directory.path().toStdString();
-    const auto fake_target = fake_source;
+    const auto fake_target = "";
     const auto instance_name = "some_instance";
 
     const auto mount_matcher = make_mount_matcher(fake_source, fake_target, instance_name);
@@ -1517,27 +1589,6 @@ TEST_F(Client, exec_cmd_fails_on_other_absent_instance)
                 Eq(mp::ReturnCode::CommandFail));
 }
 
-mp::SSHInfo make_ssh_info(const std::string& host = "222.222.222.222", int port = 22,
-                          const std::string& priv_key = mpt::fake_key_data, const std::string& username = "user")
-{
-    mp::SSHInfo ssh_info;
-
-    ssh_info.set_host(host);
-    ssh_info.set_port(port);
-    ssh_info.set_priv_key_base64(priv_key);
-    ssh_info.set_username(username);
-
-    return ssh_info;
-}
-
-mp::SSHInfoReply make_fake_ssh_info_response(const std::string& instance_name)
-{
-    mp::SSHInfoReply response;
-    (*response.mutable_ssh_info())[instance_name] = make_ssh_info();
-
-    return response;
-}
-
 struct SSHClientReturnTest : Client, WithParamInterface<int>
 {
 };
@@ -1590,9 +1641,9 @@ TEST_F(Client, execCmdWithDirPrependsCd)
     std::string cmd{"pwd"};
 
     REPLACE(ssh_channel_request_exec, ([&dir, &cmd](ssh_channel, const char* raw_cmd) {
-                EXPECT_THAT(raw_cmd, StartsWith("'cd' '" + dir + "'"));
+                EXPECT_THAT(raw_cmd, StartsWith("cd " + dir));
                 EXPECT_THAT(raw_cmd, HasSubstr("&&"));
-                EXPECT_THAT(raw_cmd, EndsWith("'" + cmd + "'"));
+                EXPECT_THAT(raw_cmd, EndsWith(cmd)); // This will fail if cmd needs to be escaped.
 
                 return SSH_OK;
             }));
@@ -1620,7 +1671,7 @@ TEST_F(Client, execCmdWithDirAndSudoUsesSh)
         cmds_string += " " + cmds[i];
 
     REPLACE(ssh_channel_request_exec, ([&dir, &cmds_string](ssh_channel, const char* raw_cmd) {
-                EXPECT_EQ(raw_cmd, "'sudo' 'sh' '-c' 'cd " + dir + " && " + cmds_string + "'");
+                EXPECT_EQ(raw_cmd, "sudo sh -c cd\\ " + dir + "\\ \\&\\&\\ " + mpu::escape_for_shell(cmds_string));
 
                 return SSH_OK;
             }));
@@ -1703,9 +1754,10 @@ TEST_F(Client, help_cmd_help_ok)
 }
 
 // info cli tests
-TEST_F(Client, info_cmd_fails_no_args)
+TEST_F(Client, infoCmdOkNoArgs)
 {
-    EXPECT_THAT(send_command({"info"}), Eq(mp::ReturnCode::CommandLineError));
+    EXPECT_CALL(mock_daemon, info(_, _));
+    EXPECT_THAT(send_command({"info"}), Eq(mp::ReturnCode::Ok));
 }
 
 TEST_F(Client, info_cmd_ok_with_one_arg)
@@ -1767,9 +1819,11 @@ TEST_F(Client, infoCmdSucceedsWithAllAndNoRuntimeInformation)
 TEST_F(Client, list_cmd_ok_no_args)
 {
     const auto list_matcher = Property(&mp::ListRequest::request_ipv4, IsTrue());
+    mp::ListReply reply;
+    reply.mutable_instance_list();
 
     EXPECT_CALL(mock_daemon, list)
-        .WillOnce(WithArg<1>(check_request_and_return<mp::ListReply, mp::ListRequest>(list_matcher, ok)));
+        .WillOnce(WithArg<1>(check_request_and_return<mp::ListReply, mp::ListRequest>(list_matcher, ok, reply)));
     EXPECT_THAT(send_command({"list"}), Eq(mp::ReturnCode::Ok));
 }
 
@@ -1786,10 +1840,17 @@ TEST_F(Client, list_cmd_help_ok)
 TEST_F(Client, list_cmd_no_ipv4_ok)
 {
     const auto list_matcher = Property(&mp::ListRequest::request_ipv4, IsFalse());
+    mp::ListReply reply;
+    reply.mutable_instance_list();
 
     EXPECT_CALL(mock_daemon, list)
-        .WillOnce(WithArg<1>(check_request_and_return<mp::ListReply, mp::ListRequest>(list_matcher, ok)));
+        .WillOnce(WithArg<1>(check_request_and_return<mp::ListReply, mp::ListRequest>(list_matcher, ok, reply)));
     EXPECT_THAT(send_command({"list", "--no-ipv4"}), Eq(mp::ReturnCode::Ok));
+}
+
+TEST_F(Client, listCmdFailsWithIpv4AndSnapshots)
+{
+    EXPECT_THAT(send_command({"list", "--no-ipv4", "--snapshots"}), Eq(mp::ReturnCode::CommandLineError));
 }
 
 // mount cli tests
@@ -2213,7 +2274,7 @@ TEST_F(Client, start_cmd_launches_petenv_if_absent_among_others_present)
     EXPECT_THAT(send_command(cmd), Eq(mp::ReturnCode::Ok));
 }
 
-TEST_F(Client, start_cmd_fails_if_petenv_if_absent_amont_others_absent)
+TEST_F(Client, start_cmd_fails_if_petenv_if_absent_amount_others_absent)
 {
     std::vector<std::string> instances{"a", "b", "c", petenv_name, "xyz"}, cmd = concat({"start"}, instances);
 
@@ -2226,7 +2287,7 @@ TEST_F(Client, start_cmd_fails_if_petenv_if_absent_amont_others_absent)
     EXPECT_THAT(send_command(cmd), Eq(mp::ReturnCode::CommandFail));
 }
 
-TEST_F(Client, start_cmd_fails_if_petenv_if_absent_amont_others_deleted)
+TEST_F(Client, start_cmd_fails_if_petenv_if_absent_amount_others_deleted)
 {
     std::vector<std::string> instances{"nope", petenv_name}, cmd = concat({"start"}, instances);
 
@@ -2428,7 +2489,7 @@ TEST_F(Client, stop_cmd_fails_with_time_suffix)
     EXPECT_THAT(send_command({"stop", "foo", "--time", "+10s"}), Eq(mp::ReturnCode::CommandLineError));
 }
 
-TEST_F(Client, stop_cmd_succeds_with_cancel)
+TEST_F(Client, stop_cmd_succeeds_with_cancel)
 {
     EXPECT_CALL(mock_daemon, stop(_, _));
     EXPECT_THAT(send_command({"stop", "foo", "--cancel"}), Eq(mp::ReturnCode::Ok));
@@ -2491,6 +2552,32 @@ TEST_F(Client, stop_cmd_disabled_petenv_all)
     EXPECT_CALL(mock_daemon, stop(_, _));
 
     EXPECT_THAT(send_command({"stop", "--all"}), Eq(mp::ReturnCode::Ok));
+}
+
+TEST_F(Client, stop_cmd_force_sends_proper_request)
+{
+    const auto force_set_matcher = Property(&mp::StopRequest::force_stop, IsTrue());
+    EXPECT_CALL(mock_daemon, stop)
+        .WillOnce(WithArg<1>(check_request_and_return<mp::StopReply, mp::StopRequest>(force_set_matcher, ok)));
+
+    EXPECT_THAT(send_command({"stop", "foo", "--force"}), Eq(mp::ReturnCode::Ok));
+}
+
+TEST_F(Client, stop_cmd_force_conflicts_with_time_option)
+{
+    EXPECT_THAT(send_command({"stop", "foo", "--force", "--time", "10"}), Eq(mp::ReturnCode::CommandLineError));
+}
+
+TEST_F(Client, stop_cmd_force_conflicts_with_cancel_option)
+{
+    EXPECT_THAT(send_command({"stop", "foo", "--force", "--cancel"}), Eq(mp::ReturnCode::CommandLineError));
+}
+
+TEST_F(Client, stopCmdWrongVmState)
+{
+    const auto invalid_vm_state_failure = grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "msg"};
+    EXPECT_CALL(mock_daemon, stop(_, _)).WillOnce(Return(invalid_vm_state_failure));
+    EXPECT_THAT(send_command({"stop", "foo"}), Eq(mp::ReturnCode::CommandFail));
 }
 
 // suspend cli tests
@@ -2788,11 +2875,70 @@ TEST_F(Client, delete_cmd_accepts_purge_option)
     EXPECT_THAT(send_command({"delete", "-p", "bar"}), Eq(mp::ReturnCode::Ok));
 }
 
+TEST_F(Client, deleteCmdWrongVmState)
+{
+    const auto invalid_vm_state_failure = grpc::Status{grpc::StatusCode::INVALID_ARGUMENT, "msg"};
+    EXPECT_CALL(mock_daemon, delet(_, _)).WillOnce(Return(invalid_vm_state_failure));
+    EXPECT_THAT(send_command({"delete", "foo"}), Eq(mp::ReturnCode::CommandFail));
+}
+
 // find cli tests
-TEST_F(Client, find_cmd_unsupported_option_ok)
+TEST_F(Client, findCmdUnsupportedOptionOk)
 {
     EXPECT_CALL(mock_daemon, find(_, _));
     EXPECT_THAT(send_command({"find", "--show-unsupported"}), Eq(mp::ReturnCode::Ok));
+}
+
+TEST_F(Client, findCmdForceUpdateOk)
+{
+    EXPECT_CALL(mock_daemon, find(_, _));
+    EXPECT_EQ(send_command({"find", "--force-update"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, findCmdForceUpdateAndOnlyImagesOk)
+{
+    EXPECT_CALL(mock_daemon, find(_, _));
+    EXPECT_EQ(send_command({"find", "--force-update", "--only-images"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, findCmdForceUpdateAndOnlyBlueprintsError)
+{
+    EXPECT_EQ(send_command({"find", "--force-update", "--only-blueprints"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, findCmdForceUpdateWithRemoteOk)
+{
+    EXPECT_CALL(mock_daemon, find(_, _));
+    EXPECT_EQ(send_command({"find", "foo:", "--force-update"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, findCmdForceUpdateWithRemoteAndSearchNameOk)
+{
+    EXPECT_CALL(mock_daemon, find(_, _));
+    EXPECT_EQ(send_command({"find", "foo:bar", "--force-update"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, findCmdFailsOnMultipleConditions)
+{
+    EXPECT_THAT(send_command({"find"
+                              "--only-blueprints",
+                              "--only-images"}),
+                Eq(mp::ReturnCode::CommandLineError));
+}
+
+TEST_F(Client, findCmdTooManyArgsFails)
+{
+    EXPECT_THAT(send_command({"find", "foo", "bar"}), Eq(mp::ReturnCode::CommandLineError));
+}
+
+TEST_F(Client, findCmdMultipleColonsFails)
+{
+    EXPECT_THAT(send_command({"find", "foo::bar"}), Eq(mp::ReturnCode::CommandLineError));
+}
+
+TEST_F(Client, findCmdHelpOk)
+{
+    EXPECT_THAT(send_command({"find", "-h"}), Eq(mp::ReturnCode::Ok));
 }
 
 // get/set cli tests
@@ -2850,9 +2996,10 @@ TEST_P(TestBasicGetSetOptions, InteractiveSetWritesSettings)
     EXPECT_THAT(send_command({"set", key}, trash_stream, trash_stream, cin), Eq(mp::ReturnCode::Ok));
 }
 
-INSTANTIATE_TEST_SUITE_P(Client, TestBasicGetSetOptions,
-                         Values(mp::petenv_key, mp::driver_key, mp::autostart_key, mp::hotkey_key,
-                                mp::bridged_interface_key, mp::mounts_key, "anything.else.really"));
+INSTANTIATE_TEST_SUITE_P(
+    Client,
+    TestBasicGetSetOptions,
+    Values(mp::petenv_key, mp::driver_key, mp::bridged_interface_key, mp::mounts_key, "anything.else.really"));
 
 TEST_F(Client, get_returns_setting)
 {
@@ -2944,23 +3091,21 @@ TEST_F(Client, get_handles_persistent_settings_errors)
 
 TEST_F(Client, get_returns_special_representation_of_empty_value_by_default)
 {
-    const auto key = mp::hotkey_key;
+    const auto key = mp::petenv_key;
     EXPECT_CALL(mock_settings, get(Eq(key))).WillOnce(Return(QStringLiteral("")));
     EXPECT_THAT(get_setting(key), Eq("<empty>"));
 }
 
 TEST_F(Client, get_returns_empty_string_on_empty_value_with_raw_option)
 {
-    const auto key = mp::hotkey_key;
+    const auto key = mp::petenv_key;
     EXPECT_CALL(mock_settings, get(Eq(key))).WillOnce(Return(QStringLiteral("")));
     EXPECT_THAT(get_setting({key, "--raw"}), IsEmpty());
 }
 
 TEST_F(Client, get_keeps_other_values_untouched_with_raw_option)
 {
-    std::vector<std::pair<const char*, QString>> keyvals{{mp::autostart_key, QStringLiteral("False")},
-                                                         {mp::petenv_key, QStringLiteral("a-pet-nAmE")},
-                                                         {mp::hotkey_key, QStringLiteral("Ctrl+Alt+U")}};
+    std::vector<std::pair<const char*, QString>> keyvals{{mp::petenv_key, QStringLiteral("a-pet-nAmE")}};
     for (const auto& [key, val] : keyvals)
     {
         EXPECT_CALL(mock_settings, get(Eq(key))).WillOnce(Return(val));
@@ -3050,11 +3195,13 @@ TEST_P(HelpTestsuite, answers_correctly)
     EXPECT_THAT(cout_stream.str(), HasSubstr(expected_text));
 }
 
-INSTANTIATE_TEST_SUITE_P(Client, HelpTestsuite,
-                         Values(std::make_pair(std::string{"alias"},
-                                               "Create an alias to be executed on a given instance.\n"),
-                                std::make_pair(std::string{"aliases"}, "List available aliases\n"),
-                                std::make_pair(std::string{"unalias"}, "Remove aliases\n")));
+INSTANTIATE_TEST_SUITE_P(
+    Client, HelpTestsuite,
+    Values(std::make_pair(std::string{"alias"}, "Create an alias to be executed on a given instance.\n"),
+           std::make_pair(std::string{"aliases"}, "List available aliases\n"),
+           std::make_pair(std::string{"unalias"}, "Remove aliases\n"),
+           std::make_pair(std::string{"prefer"},
+                          "Switch the current alias context. If it does not exist, create it before switching.")));
 
 TEST_F(Client, command_help_is_different_than_general_help)
 {
@@ -3077,6 +3224,194 @@ TEST_F(Client, help_cmd_launch_same_launch_cmd_help)
 
     EXPECT_THAT(help_cmd_launch.str(), Ne(""));
     EXPECT_THAT(help_cmd_launch.str(), Eq(launch_cmd_help.str()));
+}
+
+// clone cli tests
+
+TEST_F(Client, cloneCmdWithTooManyArgsFails)
+{
+    EXPECT_EQ(send_command({"clone", "vm1", "vm2"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, cloneCmdWithTooLessArgsFails)
+{
+    EXPECT_EQ(send_command({"clone"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, cloneCmdInvalidOptionFails)
+{
+    EXPECT_EQ(send_command({"clone", "--invalid_option"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, cloneCmdHelpOk)
+{
+    EXPECT_EQ(send_command({"clone", "--help"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, cloneCmdWithSrcVMNameOnly)
+{
+    EXPECT_CALL(mock_daemon, clone).Times(1);
+    EXPECT_EQ(send_command({"clone", "vm1"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, cloneCmdWithDestName)
+{
+    EXPECT_CALL(mock_daemon, clone).Times(2);
+    EXPECT_EQ(send_command({"clone", "vm1", "-n", "vm2"}), mp::ReturnCode::Ok);
+    EXPECT_EQ(send_command({"clone", "vm1", "--name", "vm2"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, cloneCmdFailedFromDaemon)
+{
+    const grpc::Status clone_failure{grpc::StatusCode::FAILED_PRECONDITION, "dummy_msg"};
+    EXPECT_CALL(mock_daemon, clone).Times(1).WillOnce(Return(clone_failure));
+    EXPECT_EQ(send_command({"clone", "vm1"}), mp::ReturnCode::CommandFail);
+}
+
+// snapshot cli tests
+TEST_F(Client, snapshotCmdHelpOk)
+{
+    EXPECT_EQ(send_command({"snapshot", "--help"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, snapshotCmdNoOptionsOk)
+{
+    EXPECT_CALL(mock_daemon, snapshot);
+    EXPECT_EQ(send_command({"snapshot", "foo"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, snapshotCmdNameAlternativesOk)
+{
+    EXPECT_CALL(mock_daemon, snapshot).Times(2);
+    EXPECT_EQ(send_command({"snapshot", "-n", "bar", "foo"}), mp::ReturnCode::Ok);
+    EXPECT_EQ(send_command({"snapshot", "--name", "bar", "foo"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, snapshotCmdNameConsumesArg)
+{
+    EXPECT_CALL(mock_daemon, snapshot).Times(0);
+    EXPECT_EQ(send_command({"snapshot", "--name", "foo"}), mp::ReturnCode::CommandLineError);
+    EXPECT_EQ(send_command({"snapshot", "-n", "foo"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, snapshotCmdCommentOptionAlternativesOk)
+{
+    EXPECT_CALL(mock_daemon, snapshot).Times(3);
+    EXPECT_EQ(send_command({"snapshot", "--comment", "a comment", "foo"}), mp::ReturnCode::Ok);
+    EXPECT_EQ(send_command({"snapshot", "-c", "a comment", "foo"}), mp::ReturnCode::Ok);
+    EXPECT_EQ(send_command({"snapshot", "-m", "a comment", "foo"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, snapshotCmdCommentConsumesArg)
+{
+    EXPECT_CALL(mock_daemon, snapshot).Times(0);
+    EXPECT_EQ(send_command({"snapshot", "--comment", "foo"}), mp::ReturnCode::CommandLineError);
+    EXPECT_EQ(send_command({"snapshot", "-c", "foo"}), mp::ReturnCode::CommandLineError);
+    EXPECT_EQ(send_command({"snapshot", "-m", "foo"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, snapshotCmdTooFewArgsFails)
+{
+    EXPECT_EQ(send_command({"snapshot", "-m", "Who controls the past controls the future"}),
+              mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, snapshotCmdTooManyArgsFails)
+{
+    EXPECT_EQ(send_command({"snapshot", "foo", "bar"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, snapshotCmdInvalidOptionFails)
+{
+    EXPECT_EQ(send_command({"snapshot", "--snap"}), mp::ReturnCode::CommandLineError);
+}
+
+// restore cli tests
+TEST_F(Client, restoreCmdHelpOk)
+{
+    EXPECT_EQ(send_command({"restore", "--help"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, restoreCmdGoodArgsOk)
+{
+    EXPECT_CALL(mock_daemon, restore);
+    EXPECT_EQ(send_command({"restore", "foo.snapshot1", "--destructive"}), mp::ReturnCode::Ok);
+}
+
+TEST_F(Client, restoreCmdTooFewArgsFails)
+{
+    EXPECT_EQ(send_command({"restore", "--destructive"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, restoreCmdTooManyArgsFails)
+{
+    EXPECT_EQ(send_command({"restore", "foo.snapshot1", "bar.snapshot2"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, restoreCmdMissingInstanceFails)
+{
+    EXPECT_EQ(send_command({"restore", ".snapshot1"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, restoreCmdMissingSnapshotFails)
+{
+    EXPECT_EQ(send_command({"restore", "foo."}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(Client, restoreCmdInvalidOptionFails)
+{
+    EXPECT_EQ(send_command({"restore", "--foo"}), mp::ReturnCode::CommandLineError);
+}
+
+struct RestoreCommandClient : public Client
+{
+    RestoreCommandClient()
+    {
+        EXPECT_CALL(mock_terminal, cout).WillRepeatedly(ReturnRef(cout));
+        EXPECT_CALL(mock_terminal, cerr).WillRepeatedly(ReturnRef(cerr));
+        EXPECT_CALL(mock_terminal, cin).WillRepeatedly(ReturnRef(cin));
+    }
+
+    std::ostringstream cerr, cout;
+    std::istringstream cin;
+    mpt::MockTerminal mock_terminal;
+};
+
+TEST_F(RestoreCommandClient, restoreCmdConfirmsDesruction)
+{
+    cin.str("invalid input\nyes\n");
+
+    EXPECT_CALL(mock_terminal, cin_is_live()).WillOnce(Return(true));
+    EXPECT_CALL(mock_terminal, cout_is_live()).WillOnce(Return(true));
+
+    EXPECT_CALL(mock_daemon, restore(_, _)).WillOnce([](auto, auto* server) {
+        mp::RestoreRequest request;
+        server->Read(&request);
+
+        EXPECT_FALSE(request.destructive());
+
+        mp::RestoreReply reply;
+        reply.set_confirm_destructive(true);
+        server->Write(reply);
+        return grpc::Status{};
+    });
+
+    EXPECT_EQ(setup_client_and_run({"restore", "foo.snapshot1"}, mock_terminal), mp::ReturnCode::Ok);
+    EXPECT_TRUE(cout.str().find("Please answer yes/no"));
+}
+
+TEST_F(RestoreCommandClient, restoreCmdNotDestructiveNotLiveTermFails)
+{
+    EXPECT_CALL(mock_terminal, cin_is_live()).WillOnce(Return(false));
+
+    EXPECT_CALL(mock_daemon, restore(_, _)).WillOnce([](auto, auto* server) {
+        mp::RestoreReply reply;
+        reply.set_confirm_destructive(true);
+        server->Write(reply);
+        return grpc::Status{};
+    });
+
+    EXPECT_THROW(setup_client_and_run({"restore", "foo.snapshot1"}, mock_terminal), std::runtime_error);
 }
 
 // authenticate cli tests
@@ -3311,8 +3646,8 @@ TEST_F(ClientAlias, alias_creates_alias)
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map\n"
-                                                "another_alias,primary,another_command,default\n");
+    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map,default*\n"
+                                                "another_alias,primary,another_command,default,default*\n");
 }
 
 struct ClientAliasNameSuite : public ClientAlias,
@@ -3335,14 +3670,15 @@ TEST_P(ClientAliasNameSuite, creates_correct_default_alias_name)
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    EXPECT_THAT(cout_stream.str(), fmt::format(csv_header + "{},primary,{}{},default\n", command, path, command));
+    EXPECT_THAT(cout_stream.str(),
+                fmt::format(csv_header + "{},primary,{}{},default,default*\n", command, path, command));
 }
 
 INSTANTIATE_TEST_SUITE_P(ClientAlias, ClientAliasNameSuite,
                          Combine(Values("command", "com.mand", "com.ma.nd"),
                                  Values("", "/", "./", "./relative/", "/absolute/", "../more/relative/")));
 
-TEST_F(ClientAlias, fails_if_cannot_write_script)
+TEST_F(ClientAlias, failsIfCannotWriteFullyQualifiedScript)
 {
     EXPECT_CALL(*mock_platform, create_alias_script(_, _)).Times(1).WillRepeatedly(Throw(std::runtime_error("aaa")));
 
@@ -3351,6 +3687,25 @@ TEST_F(ClientAlias, fails_if_cannot_write_script)
     std::stringstream cerr_stream;
     EXPECT_EQ(send_command({"alias", "primary:command"}, trash_stream, cerr_stream), mp::ReturnCode::CommandLineError);
     EXPECT_EQ(cerr_stream.str(), "Error when creating script for alias: aaa\n");
+
+    std::stringstream cout_stream;
+    send_command({"aliases", "--format=csv"}, cout_stream);
+
+    EXPECT_THAT(cout_stream.str(), csv_header);
+}
+
+TEST_F(ClientAlias, failsIfCannotWriteNonFullyQualifiedScript)
+{
+    EXPECT_CALL(*mock_platform, create_alias_script(_, _))
+        .WillOnce(Return())
+        .WillOnce(Throw(std::runtime_error("bbb")));
+    EXPECT_CALL(*mock_platform, remove_alias_script(_)).WillOnce(Return());
+
+    EXPECT_CALL(mock_daemon, info(_, _)).Times(AtMost(1)).WillRepeatedly(make_info_function());
+
+    std::stringstream cerr_stream;
+    EXPECT_EQ(send_command({"alias", "primary:command"}, trash_stream, cerr_stream), mp::ReturnCode::CommandLineError);
+    EXPECT_EQ(cerr_stream.str(), "Error when creating script for alias: bbb\n");
 
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
@@ -3367,12 +3722,12 @@ TEST_F(ClientAlias, alias_does_not_overwrite_alias)
     std::stringstream cerr_stream;
     EXPECT_EQ(send_command({"alias", "primary:another_command", "an_alias"}, trash_stream, cerr_stream),
               mp::ReturnCode::CommandLineError);
-    EXPECT_EQ(cerr_stream.str(), "Alias 'an_alias' already exists\n");
+    EXPECT_EQ(cerr_stream.str(), "Alias 'an_alias' already exists in current context\n");
 
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map\n");
+    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map,default*\n");
 }
 
 struct ArgumentCheckTestsuite
@@ -3503,7 +3858,7 @@ TEST_F(ClientAlias, alias_refuses_creation_nonexistent_instance)
 
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map\n");
+    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map,default*\n");
 }
 
 TEST_F(ClientAlias, alias_refuses_creation_rpc_error)
@@ -3520,7 +3875,46 @@ TEST_F(ClientAlias, alias_refuses_creation_rpc_error)
 
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map\n");
+    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map,default*\n");
+}
+
+TEST_F(ClientAlias, aliasRefusesCreateDuplicateAlias)
+{
+    EXPECT_CALL(mock_daemon, info(_, _)).Times(AtMost(1)).WillRepeatedly(make_info_function());
+
+    populate_db_file(AliasesVector{{"an_alias", {"primary", "a_command", "map"}}});
+
+    std::stringstream cout_stream, cerr_stream;
+    send_command({"alias", "primary:another_command", "an_alias"}, cout_stream, cerr_stream);
+
+    EXPECT_EQ(cout_stream.str(), "");
+    EXPECT_EQ(cerr_stream.str(), "Alias 'an_alias' already exists in current context\n");
+
+    send_command({"aliases", "--format=csv"}, cout_stream);
+
+    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,primary,a_command,map,default*\n");
+}
+
+TEST_F(ClientAlias, aliasCreatesAliasThatExistsInAnotherContext)
+{
+    EXPECT_CALL(mock_daemon, info(_, _)).Times(AtMost(1)).WillRepeatedly(make_info_function());
+
+    populate_db_file(AliasesVector{{"an_alias", {"primary", "a_command", "map"}}});
+
+    EXPECT_EQ(send_command({"prefer", "new_context"}), mp::ReturnCode::Ok);
+
+    std::stringstream cout_stream, cerr_stream;
+    EXPECT_EQ(send_command({"alias", "primary:another_command", "an_alias"}, cout_stream, cerr_stream),
+              mp::ReturnCode::Ok);
+
+    EXPECT_EQ(cout_stream.str(), "");
+    EXPECT_EQ(cerr_stream.str(), "");
+
+    send_command({"aliases", "--format=csv"}, cout_stream);
+
+    EXPECT_THAT(cout_stream.str(),
+                csv_header +
+                    "an_alias,primary,a_command,map,default\nan_alias,primary,another_command,map,new_context*\n");
 }
 
 TEST_F(ClientAlias, unalias_removes_existing_alias)
@@ -3533,7 +3927,7 @@ TEST_F(ClientAlias, unalias_removes_existing_alias)
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,default\n");
+    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,default,default*\n");
 }
 
 TEST_F(ClientAlias, unalias_succeeds_even_if_script_cannot_be_removed)
@@ -3545,12 +3939,12 @@ TEST_F(ClientAlias, unalias_succeeds_even_if_script_cannot_be_removed)
 
     std::stringstream cerr_stream;
     EXPECT_EQ(send_command({"unalias", "another_alias"}, trash_stream, cerr_stream), mp::ReturnCode::Ok);
-    EXPECT_THAT(cerr_stream.str(), Eq("Warning: 'bbb' when removing alias script for another_alias\n"));
+    EXPECT_THAT(cerr_stream.str(), Eq("Warning: 'bbb' when removing alias script for default.another_alias\n"));
 
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map\n");
+    EXPECT_THAT(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map,default*\n");
 }
 
 TEST_F(ClientAlias, unaliasDoesNotRemoveNonexistentAlias)
@@ -3566,9 +3960,8 @@ TEST_F(ClientAlias, unaliasDoesNotRemoveNonexistentAlias)
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    EXPECT_EQ(cout_stream.str(),
-              csv_header +
-                  "an_alias,an_instance,a_command,map\nanother_alias,another_instance,another_command,default\n");
+    EXPECT_EQ(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map,default*\n"
+                                              "another_alias,another_instance,another_command,default,default*\n");
 }
 
 TEST_F(ClientAlias, unaliasDoesNotRemoveNonexistentAliases)
@@ -3589,8 +3982,8 @@ TEST_F(ClientAlias, unaliasDoesNotRemoveNonexistentAliases)
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    EXPECT_EQ(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,default\n"
-                                              "another_alias,another_instance,another_command,map\n");
+    EXPECT_EQ(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,default,default*\n"
+                                              "another_alias,another_instance,another_command,map,default*\n");
 }
 
 TEST_F(ClientAlias, unaliasDashDashAllWorks)
@@ -3620,68 +4013,22 @@ TEST_F(ClientAlias, unaliasDashDashAllClashesWithOtherArguments)
     std::stringstream cout_stream;
     send_command({"aliases", "--format=csv"}, cout_stream);
 
-    EXPECT_EQ(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map\n"
-                                              "another_alias,another_instance,another_command,default\n");
+    EXPECT_EQ(cout_stream.str(), csv_header + "an_alias,an_instance,a_command,map,default*\n"
+                                              "another_alias,another_instance,another_command,default,default*\n");
 }
 
-TEST_F(ClientAlias, fails_when_remove_backup_alias_file_fails)
+TEST_F(ClientAlias, fails_if_unable_to_create_directory)
 {
     auto [mock_file_ops, guard] = mpt::MockFileOps::inject();
 
-    EXPECT_CALL(*mock_file_ops, exists(A<const QFile&>()))
-        .WillOnce(Return(false))
-        .WillOnce(Return(true))
-        .WillOnce(Return(true));
-    EXPECT_CALL(*mock_file_ops, mkpath(_, _)).WillOnce(Return(true)); // mpu::create_temp_file_with_path()
-    EXPECT_CALL(*mock_file_ops, open(_, _)).Times(2).WillRepeatedly(Return(true));
-    EXPECT_CALL(*mock_file_ops, write(_, _)).WillOnce(Return(true));
-    EXPECT_CALL(*mock_file_ops, remove(_)).WillOnce(Return(false));
-
+    EXPECT_CALL(*mock_file_ops, exists(A<const QFile&>())).WillOnce(Return(false));
+    EXPECT_CALL(*mock_file_ops, mkpath(_, _)).WillOnce(Return(false));
     EXPECT_CALL(mock_daemon, info(_, _)).Times(AtMost(1)).WillRepeatedly(make_info_function());
 
     std::stringstream cerr_stream;
     send_command({"alias", "primary:command", "alias_name"}, trash_stream, cerr_stream);
 
-    ASSERT_THAT(cerr_stream.str(), HasSubstr("cannot remove old aliases backup file "));
-}
-
-TEST_F(ClientAlias, fails_renaming_alias_file_fails)
-{
-    auto [mock_file_ops, guard] = mpt::MockFileOps::inject();
-
-    EXPECT_CALL(*mock_file_ops, exists(A<const QFile&>()))
-        .WillOnce(Return(false))
-        .WillOnce(Return(true))
-        .WillOnce(Return(false));
-    EXPECT_CALL(*mock_file_ops, mkpath(_, _)).WillOnce(Return(true)); // mpu::create_temp_file_with_path()
-    EXPECT_CALL(*mock_file_ops, open(_, _)).Times(2).WillRepeatedly(Return(true));
-    EXPECT_CALL(*mock_file_ops, write(_, _)).WillOnce(Return(true));
-    EXPECT_CALL(*mock_file_ops, rename(_, _)).WillOnce(Return(false));
-
-    EXPECT_CALL(mock_daemon, info(_, _)).Times(AtMost(1)).WillRepeatedly(make_info_function());
-
-    std::stringstream cerr_stream;
-    send_command({"alias", "primary:command", "alias_name"}, trash_stream, cerr_stream);
-
-    ASSERT_THAT(cerr_stream.str(), HasSubstr("cannot rename aliases config to "));
-}
-
-TEST_F(ClientAlias, fails_creating_alias_file_fails)
-{
-    auto [mock_file_ops, guard] = mpt::MockFileOps::inject();
-
-    EXPECT_CALL(*mock_file_ops, exists(A<const QFile&>())).WillOnce(Return(false)).WillOnce(Return(false));
-    EXPECT_CALL(*mock_file_ops, mkpath(_, _)).WillOnce(Return(true)); // mpu::create_temp_file_with_path()
-    EXPECT_CALL(*mock_file_ops, open(_, _)).Times(2).WillRepeatedly(Return(true));
-    EXPECT_CALL(*mock_file_ops, write(_, _)).WillOnce(Return(true));
-    EXPECT_CALL(*mock_file_ops, rename(_, _)).WillOnce(Return(false));
-
-    EXPECT_CALL(mock_daemon, info(_, _)).Times(AtMost(1)).WillRepeatedly(make_info_function());
-
-    std::stringstream cerr_stream;
-    send_command({"alias", "primary:command", "alias_name"}, trash_stream, cerr_stream);
-
-    ASSERT_THAT(cerr_stream.str(), HasSubstr("cannot create aliases config file "));
+    ASSERT_THAT(cerr_stream.str(), HasSubstr("Could not create path"));
 }
 
 TEST_F(ClientAlias, creating_first_alias_displays_message)
@@ -3748,9 +4095,9 @@ TEST_F(ClientAlias, execAliasRewritesMountedDir)
     populate_db_file(AliasesVector{{alias_name, {instance_name, cmd, "map"}}});
 
     REPLACE(ssh_channel_request_exec, ([&target_dir, &cmd](ssh_channel, const char* raw_cmd) {
-                EXPECT_THAT(raw_cmd, StartsWith("'cd' '" + target_dir + "/'"));
+                EXPECT_THAT(raw_cmd, StartsWith("cd " + target_dir + "/"));
                 EXPECT_THAT(raw_cmd, HasSubstr("&&"));
-                EXPECT_THAT(raw_cmd, EndsWith("'" + cmd + "'"));
+                EXPECT_THAT(raw_cmd, EndsWith(cmd)); // assuming that cmd does not have escaped characters!
 
                 return SSH_OK;
             }));
@@ -3792,9 +4139,9 @@ TEST_P(NotDirRewriteTestsuite, execAliasDoesNotRewriteMountedDir)
     populate_db_file(AliasesVector{{alias_name, {instance_name, cmd, map_dir ? "map" : "default"}}});
 
     REPLACE(ssh_channel_request_exec, ([&cmd](ssh_channel, const char* raw_cmd) {
-                EXPECT_THAT(raw_cmd, Not(StartsWith("'cd' '")));
+                EXPECT_THAT(raw_cmd, Not(StartsWith("cd ")));
                 EXPECT_THAT(raw_cmd, Not(HasSubstr("&&")));
-                EXPECT_THAT(raw_cmd, EndsWith("'" + cmd + "'"));
+                EXPECT_THAT(raw_cmd, EndsWith(cmd)); // again, assuming that cmd does not have escaped characters
 
                 return SSH_OK;
             }));
@@ -3826,4 +4173,27 @@ INSTANTIATE_TEST_SUITE_P(ClientAlias, NotDirRewriteTestsuite,
                          Values(std::make_pair(false, QDir{QDir::current()}.canonicalPath()),
                                 std::make_pair(true, QDir{QDir::current()}.canonicalPath() + "/0/1/2/3/4/5/6/7/8/9"),
                                 std::make_pair(true, current_cdup() + "/different_name")));
+
+TEST_F(ClientAliasNameSuite, preferWithNoArgumentFails)
+{
+    EXPECT_EQ(send_command({"prefer"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(ClientAliasNameSuite, preferWithManyArgumentsFails)
+{
+    EXPECT_EQ(send_command({"prefer", "arg", "arg"}), mp::ReturnCode::CommandLineError);
+}
+
+TEST_F(ClientAliasNameSuite, preferWorks)
+{
+    std::stringstream cout_stream;
+    send_command({"aliases", "--format=yaml"}, cout_stream);
+    EXPECT_THAT(cout_stream.str(), HasSubstr("active_context: default\n"));
+
+    EXPECT_EQ(send_command({"prefer", "new_context"}), mp::ReturnCode::Ok);
+
+    cout_stream.str(std::string());
+    send_command({"aliases", "--format=yaml"}, cout_stream);
+    EXPECT_THAT(cout_stream.str(), HasSubstr("active_context: new_context\n"));
+}
 } // namespace

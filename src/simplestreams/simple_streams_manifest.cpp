@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -61,13 +61,28 @@ QString latest_version_in(const QJsonObject& versions)
     return max_version;
 }
 
-QString derive_unpacked_file_path_prefix_from(const QString& image_location, const QString& image_suffix)
+QMap<QString, const mp::VMImageInfo*> qmap_aliases_to_vm_info_for(const std::vector<mp::VMImageInfo>& images)
 {
-    QFileInfo info{image_location};
-    auto file_name = info.fileName().remove('-' + image_suffix).remove(".img");
-    return info.path().append("/unpacked/").append(file_name);
+    QMap<QString, const mp::VMImageInfo*> map;
+
+    for (const auto& image : images)
+    {
+        map[image.id] = &image;
+        for (const auto& alias : image.aliases)
+        {
+            map[alias] = &image;
+        }
+    }
+
+    return map;
 }
+
 } // namespace
+
+mp::SimpleStreamsManifest::SimpleStreamsManifest(const QString& updated_at, std::vector<VMImageInfo>&& images)
+    : updated_at{updated_at}, products{std::move(images)}, image_records{qmap_aliases_to_vm_info_for(products)}
+{
+}
 
 std::unique_ptr<mp::SimpleStreamsManifest>
 mp::SimpleStreamsManifest::fromJson(const QByteArray& json_from_official,
@@ -99,7 +114,7 @@ mp::SimpleStreamsManifest::fromJson(const QByteArray& json_from_official,
     for (auto it = manifest_products.constBegin(); it != manifest_products.constEnd(); ++it)
     {
         const auto product_key = it.key();
-        const auto product = it.value();
+        const QJsonValue product = it.value();
 
         if (product["arch"].toString() != arch)
             continue;
@@ -108,7 +123,8 @@ mp::SimpleStreamsManifest::fromJson(const QByteArray& json_from_official,
 
         const auto release = product["release"].toString();
         const auto release_title = product["release_title"].toString();
-        const auto supported = product["supported"].toBool();
+        const auto release_codename = product["release_codename"].toString();
+        const auto supported = product["supported"].toBool() || product_aliases.contains("devel");
 
         const auto versions = product["versions"].toObject();
         if (versions.isEmpty())
@@ -135,7 +151,7 @@ mp::SimpleStreamsManifest::fromJson(const QByteArray& json_from_official,
             const auto& driver = MP_SETTINGS.get(mp::driver_key);
 
             QJsonObject image;
-            QString sha256, image_location, kernel_location, initrd_location;
+            QString sha256, image_location;
             int size = -1;
 
             // TODO: make this a VM factory call with a preference list
@@ -158,35 +174,27 @@ mp::SimpleStreamsManifest::fromJson(const QByteArray& json_from_official,
                 image_location = image["path"].toString();
                 sha256 = image["sha256"].toString();
                 size = image["size"].toInt(-1);
-
-                // NOTE: These are not defined in the manifest itself
-                // so they are not guaranteed to be correct or exist in the server
-                const auto prefix = derive_unpacked_file_path_prefix_from(image_location, image_key);
-                kernel_location = prefix + "-vmlinuz-generic";
-                initrd_location = prefix + "-initrd-generic";
             }
 
             // Aliases always alias to the latest version
             const QStringList& aliases = version_string == latest_version ? product_aliases : QStringList();
-            products.push_back({aliases, "Ubuntu", release, release_title, supported, image_location, kernel_location,
-                                initrd_location, sha256, host_url, version_string, size, true});
+            products.push_back({aliases,
+                                "Ubuntu",
+                                release,
+                                release_title,
+                                release_codename,
+                                supported,
+                                image_location,
+                                sha256,
+                                host_url,
+                                version_string,
+                                size,
+                                true});
         }
     }
 
     if (products.empty())
         throw mp::EmptyManifestException("No supported products found.");
 
-    QMap<QString, const VMImageInfo*> map;
-
-    for (const auto& product : products)
-    {
-        map[product.id] = &product;
-        for (const auto& alias : product.aliases)
-        {
-            map[alias] = &product;
-        }
-    }
-
-    return std::unique_ptr<SimpleStreamsManifest>(
-        new SimpleStreamsManifest{updated, std::move(products), std::move(map)});
+    return std::make_unique<SimpleStreamsManifest>(updated, std::move(products));
 }

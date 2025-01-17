@@ -1,4 +1,4 @@
-# Copyright © 2017-2022 Canonical Ltd.
+# Copyright (C) Canonical, Ltd.
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 3 as
@@ -24,7 +24,7 @@ function(add_ssh_target TARGET_NAME)
     fmt
     libssh
     utils
-    Qt5::Core)
+    Qt6::Core)
 endfunction()
 
 add_ssh_target(ssh_common)
@@ -43,7 +43,7 @@ function(add_sftp_client_target TARGET_NAME)
     fmt
     libssh
     utils
-    Qt5::Core)
+    Qt6::Core)
 endfunction()
 
 add_sftp_client_target(sftp_client)
@@ -61,7 +61,7 @@ function(add_ssh_client_target TARGET_NAME)
     fmt
     libssh
     utils
-    Qt5::Core)
+    Qt6::Core)
 endfunction()
 
 add_ssh_client_target(ssh_client)

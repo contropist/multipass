@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -122,26 +122,6 @@ TEST_F(TestPersistentSettingsHandler, keysReturnsSpecsKey)
     EXPECT_THAT(handler.keys(), UnorderedPointwise(Eq(), expected));
 }
 
-TEST_F(TestPersistentSettingsHandler, getReadsUtf8)
-{
-    const auto key = "asdf";
-    EXPECT_CALL(*mock_qsettings, setIniCodec(StrEq("UTF-8")));
-
-    inject_mock_qsettings();
-
-    make_handler(key).get(key);
-}
-
-TEST_F(TestPersistentSettingsHandler, setWritesUtf8)
-{
-    const auto key = "a.key";
-    EXPECT_CALL(*mock_qsettings, setIniCodec(StrEq("UTF-8")));
-
-    inject_mock_qsettings();
-
-    make_handler(key).set(key, "kokoko");
-}
-
 TEST_F(TestPersistentSettingsHandler, getThrowsOnUnreadableFile)
 {
     const auto key = "foo";
@@ -219,6 +199,28 @@ TEST_F(TestPersistentSettingsHandler, getReturnsRecordedSetting)
 
     ASSERT_NE(val, default_);
     EXPECT_EQ(handler.get(key), QString{val});
+}
+
+TEST_F(TestPersistentSettingsHandler, getResetsInvalidValueAndReturnsDefault)
+{
+    const auto key = "tampered.setting", val = "xyz", default_ = "abc", error = "nonsense";
+    const auto handler = make_handler(key, default_, [&key, &val, &error](QString v) -> QString {
+        if (v == val)
+            throw mp::InvalidSettingException{key, val, error};
+
+        return v;
+    });
+
+    {
+        InSequence seq;
+        EXPECT_CALL(*mock_qsettings, value_impl(Eq(key), _)).WillOnce(Return(val));
+        EXPECT_CALL(*mock_qsettings, remove(Eq(key)));
+    }
+
+    inject_mock_qsettings();
+
+    ASSERT_NE(val, default_);
+    EXPECT_EQ(handler.get(key), QString{default_});
 }
 
 TEST_F(TestPersistentSettingsHandler, getReturnsDefaultByDefault)

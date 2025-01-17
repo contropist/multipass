@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -54,6 +54,8 @@ class DaemonRpc : public QObject, public multipass::Rpc::Service, private Disabl
 public:
     DaemonRpc(const std::string& server_address, const CertProvider& cert_provider, CertStore* client_cert_store);
 
+    void shutdown_and_wait();
+
 signals:
     void on_create(const CreateRequest* request, grpc::ServerReaderWriter<CreateReply, CreateRequest>* server,
                    std::promise<grpc::Status>* status_promise);
@@ -67,6 +69,9 @@ signals:
                  std::promise<grpc::Status>* status_promise);
     void on_list(const ListRequest* request, grpc::ServerReaderWriter<ListReply, ListRequest>* server,
                  std::promise<grpc::Status>* status_promise);
+    void on_clone(const CloneRequest* request,
+                  grpc::ServerReaderWriter<CloneReply, CloneRequest>* server,
+                  std::promise<grpc::Status>* status_promise);
     void on_networks(const NetworksRequest* request, grpc::ServerReaderWriter<NetworksReply, NetworksRequest>* server,
                      std::promise<grpc::Status>* status_promise);
     void on_mount(const MountRequest* request, grpc::ServerReaderWriter<MountReply, MountRequest>* server,
@@ -98,6 +103,15 @@ signals:
     void on_authenticate(const AuthenticateRequest* request,
                          grpc::ServerReaderWriter<AuthenticateReply, AuthenticateRequest>* server,
                          std::promise<grpc::Status>* status_promise);
+    void on_snapshot(const SnapshotRequest* request,
+                     grpc::ServerReaderWriter<SnapshotReply, SnapshotRequest>* server,
+                     std::promise<grpc::Status>* status_promise);
+    void on_restore(const RestoreRequest* request,
+                    grpc::ServerReaderWriter<RestoreReply, RestoreRequest>* server,
+                    std::promise<grpc::Status>* status_promise);
+    void on_daemon_info(const DaemonInfoRequest* request,
+                        grpc::ServerReaderWriter<DaemonInfoReply, DaemonInfoRequest>* server,
+                        std::promise<grpc::Status>* status_promise);
 
 private:
     template <typename OperationSignal>
@@ -118,6 +132,8 @@ protected:
     grpc::Status find(grpc::ServerContext* context, grpc::ServerReaderWriter<FindReply, FindRequest>* server) override;
     grpc::Status info(grpc::ServerContext* context, grpc::ServerReaderWriter<InfoReply, InfoRequest>* server) override;
     grpc::Status list(grpc::ServerContext* context, grpc::ServerReaderWriter<ListReply, ListRequest>* server) override;
+    grpc::Status clone(grpc::ServerContext* context,
+                       grpc::ServerReaderWriter<CloneReply, CloneRequest>* server) override;
     grpc::Status networks(grpc::ServerContext* context,
                           grpc::ServerReaderWriter<NetworksReply, NetworksRequest>* server) override;
     grpc::Status mount(grpc::ServerContext* context,
@@ -145,6 +161,12 @@ protected:
     grpc::Status keys(grpc::ServerContext* context, grpc::ServerReaderWriter<KeysReply, KeysRequest>* server) override;
     grpc::Status authenticate(grpc::ServerContext* context,
                               grpc::ServerReaderWriter<AuthenticateReply, AuthenticateRequest>* server) override;
+    grpc::Status snapshot(grpc::ServerContext* context,
+                          grpc::ServerReaderWriter<SnapshotReply, SnapshotRequest>* server) override;
+    grpc::Status restore(grpc::ServerContext* context,
+                         grpc::ServerReaderWriter<RestoreReply, RestoreRequest>* server) override;
+    grpc::Status daemon_info(grpc::ServerContext* context,
+                             grpc::ServerReaderWriter<DaemonInfoReply, DaemonInfoRequest>* server) override;
 };
 } // namespace multipass
 #endif // MULTIPASS_DAEMON_RPC_H

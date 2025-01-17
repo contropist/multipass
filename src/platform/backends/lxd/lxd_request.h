@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -44,6 +44,14 @@ class LXDRuntimeError : public std::runtime_error
 {
 public:
     LXDRuntimeError(const std::string& message) : runtime_error{message}
+    {
+    }
+};
+
+class LXDNetworkError : public LXDRuntimeError
+{
+public:
+    LXDNetworkError(const std::string& message) : LXDRuntimeError{message}
     {
     }
 };

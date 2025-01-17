@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021-2022 Canonical, Ltd.
+ * Copyright (C) Canonical, Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,14 +20,17 @@
 #include <multipass/file_ops.h>
 #include <multipass/format.h>
 #include <multipass/logging/log.h>
+#include <multipass/platform.h>
 #include <multipass/utils.h>
 
 #include <shared/linux/backend_utils.h>
 
+#include <QCoreApplication>
 #include <QFile>
 
 namespace mp = multipass;
 namespace mpl = multipass::logging;
+namespace mpu = multipass::utils;
 
 namespace
 {
@@ -116,7 +119,7 @@ void delete_virtual_switch(const QString& bridge_name)
 
 mp::QemuPlatformDetail::QemuPlatformDetail(const mp::Path& data_dir)
     : bridge_name{multipass_bridge_name},
-      network_dir{mp::utils::make_dir(QDir(data_dir), "network")},
+      network_dir{MP_UTILS.make_dir(QDir(data_dir), "network")},
       subnet{MP_BACKEND.get_subnet(network_dir, bridge_name)},
       dnsmasq_server{init_nat_network(network_dir, bridge_name, subnet)},
       firewall_config{MP_FIREWALL_CONFIG_FACTORY.make_firewall_config(bridge_name, subnet)}
@@ -136,8 +139,7 @@ mp::QemuPlatformDetail::~QemuPlatformDetail()
 
 std::optional<mp::IPAddress> mp::QemuPlatformDetail::get_ip_for(const std::string& hw_addr)
 {
-    auto ip_and_host = dnsmasq_server->get_ip_and_host_for(hw_addr);
-    return ip_and_host ? std::make_optional(ip_and_host.value().first) : std::nullopt;
+    return dnsmasq_server->get_ip_for(hw_addr);
 }
 
 void mp::QemuPlatformDetail::remove_resources_for(const std::string& name)
@@ -193,18 +195,47 @@ QStringList mp::QemuPlatformDetail::vm_platform_args(const VirtualMachineDescrip
          << QString::fromStdString(fmt::format("tap,ifname={},script=no,downscript=no,model=virtio-net-pci,mac={}",
                                                tap_device_name, vm_desc.default_mac_address));
 
-    return opts;
-}
+    const auto bridge_helper_exec_path =
+        QDir(QCoreApplication::applicationDirPath()).filePath(BRIDGE_HELPER_EXEC_NAME_CPP);
 
-// FIXME: after moving to core22, this will be handled by dnsmasq --dhcp-ignore-clid
-void multipass::QemuPlatformDetail::release_mac_with_different_hostname(const std::string& hw_addr,
-                                                                        const std::string& name)
-{
-    if (auto ip_and_host = dnsmasq_server->get_ip_and_host_for(hw_addr); ip_and_host && ip_and_host->second != name)
-        dnsmasq_server->release_mac(hw_addr);
+    for (const auto& extra_interface : vm_desc.extra_interfaces)
+    {
+        opts << "-nic"
+             << QString::fromStdString(fmt::format("bridge,br={},model=virtio-net-pci,mac={},helper={}",
+                                                   extra_interface.id,
+                                                   extra_interface.mac_address,
+                                                   bridge_helper_exec_path));
+    }
+
+    return opts;
 }
 
 mp::QemuPlatform::UPtr mp::QemuPlatformFactory::make_qemu_platform(const Path& data_dir) const
 {
     return std::make_unique<mp::QemuPlatformDetail>(data_dir);
+}
+
+bool mp::QemuPlatformDetail::is_network_supported(const std::string& network_type) const
+{
+    return network_type == "bridge" || network_type == "ethernet";
+}
+
+bool mp::QemuPlatformDetail::needs_network_prep() const
+{
+    return true;
+}
+
+void mp::QemuPlatformDetail::set_authorization(std::vector<NetworkInterfaceInfo>& networks)
+{
+    const auto& br_nomenclature = MP_PLATFORM.bridge_nomenclature();
+
+    for (auto& net : networks)
+        if (net.type == "ethernet" && !mpu::find_bridge_with(networks, net.id, br_nomenclature))
+            net.needs_authorization = true;
+}
+
+std::string mp::QemuPlatformDetail::create_bridge_with(const NetworkInterfaceInfo& interface) const
+{
+    assert(interface.type == "ethernet");
+    return MP_BACKEND.create_bridge_with(interface.id);
 }
